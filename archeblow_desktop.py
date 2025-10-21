@@ -31,6 +31,7 @@ from archeblow_service import (
     Network,
     TransactionHop,
 )
+from api_keys import API_SERVICE_KEYS, get_api_key, get_masked_key
 
 
 class UnsupportedNetworkError(RuntimeError):
@@ -44,7 +45,13 @@ class BlockCypherExplorerClient:
         Network.BITCOIN: "https://api.blockcypher.com/v1/btc/main",
     }
 
-    def __init__(self, network: Network, *, session: httpx.AsyncClient | None = None) -> None:
+    def __init__(
+        self,
+        network: Network,
+        *,
+        session: httpx.AsyncClient | None = None,
+        token: str | None = None,
+    ) -> None:
         if network not in self._BASE_ENDPOINTS:
             raise UnsupportedNetworkError(
                 f"Сеть {network.value} не поддерживается публичным API BlockCypher."
@@ -52,10 +59,13 @@ class BlockCypherExplorerClient:
         self.network = network
         self._base_url = self._BASE_ENDPOINTS[network]
         self._session = session
+        self._token = token
 
     async def fetch_transaction_hops(self, address: str) -> Sequence[TransactionHop]:
         url = f"{self._base_url}/addrs/{address}/full"
         params = {"limit": 50, "txlimit": 50}
+        if self._token:
+            params["token"] = self._token
         close_session = False
         session = self._session
         if session is None:
@@ -578,7 +588,8 @@ class NewAnalysisPage(QtWidgets.QWidget):
 
     async def _perform_analysis(self, address: str, network: Network) -> AddressAnalysisResult:
         self.log_output.append("Запрос истории транзакций…")
-        explorer = BlockCypherExplorerClient(network)
+        blockcypher_token = get_api_key("blockcypher")
+        explorer = BlockCypherExplorerClient(network, token=blockcypher_token)
         mixer_client = HeuristicMixerClient(watchlist=_DEFAULT_MIXER_WATCHLIST)
         analyzer = ArcheBlowAnalyzer(explorer_clients=[explorer], mixer_clients=[mixer_client])
         result = await analyzer.analyze(address, network)
@@ -1053,7 +1064,11 @@ class AnalysisDetailPage(QtWidgets.QWidget):
         self.risk_notes.setPlainText("\n".join(notes))
 
         self.services_list.clear()
-        self.services_list.addItems(["BlockCypher API", "Heuristic Mixer Watchlist"])
+        services_used = [
+            API_SERVICE_KEYS["blockcypher"].display_name,
+            API_SERVICE_KEYS["heuristic_mixer"].display_name,
+        ]
+        self.services_list.addItems(services_used)
 
         self.graph_widget.load_from_analysis(analysis)
         self._populate_transactions(analysis)
@@ -1180,29 +1195,6 @@ class AnalysisDetailPage(QtWidgets.QWidget):
 
         return widget
 
-    def _create_forecast_tab(self) -> QtWidgets.QWidget:
-        widget = QtWidgets.QWidget()
-        layout = QtWidgets.QVBoxLayout(widget)
-        layout.setSpacing(16)
-        layout.setContentsMargins(24, 24, 24, 24)
-
-        info = QtWidgets.QLabel(
-            "Прогнозные модели готовятся к интеграции."
-            "\nСценарии будут доступны после обучения моделей."
-        )
-        info.setWordWrap(True)
-        info.setStyleSheet("color: #8b949e; font-size: 13px;")
-        layout.addWidget(info)
-
-        card = QtWidgets.QGroupBox("Запланированные сценарии")
-        card_layout = QtWidgets.QVBoxLayout(card)
-        card_layout.addWidget(QtWidgets.QLabel("• Детекция аномалий по графу связей"))
-        card_layout.addWidget(QtWidgets.QLabel("• Прогнозирование рисковых потоков"))
-        card_layout.addWidget(QtWidgets.QLabel("• Индикаторы эскалации для команд мониторинга"))
-        layout.addWidget(card)
-
-        return widget
-
     def _create_report_tab(self) -> QtWidgets.QWidget:
         widget = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(widget)
@@ -1259,7 +1251,16 @@ class IntegrationsPage(QtWidgets.QWidget):
         title.setStyleSheet("color: #ffffff; font-size: 20px; font-weight: 600;")
         layout.addWidget(title)
 
-        table = QtWidgets.QTableWidget(4, 5)
+        services = [
+            ("blockcypher", "Активен", "60%", "Синхронизировать"),
+            ("blockchair", "Активен", "75%", "Обновить токен"),
+            ("chainz", "Ограничен", "90%", "Проверить лимиты"),
+            ("coingecko", "Ошибка", "--", "Просмотр логов"),
+            ("ofac_watchlist", "Активен", "--", "Обновить"),
+            ("heuristic_mixer", "Активен", "--", "Синхронизировать"),
+        ]
+
+        table = QtWidgets.QTableWidget(len(services), 5)
         table.setHorizontalHeaderLabels([
             "Сервис",
             "Статус",
@@ -1267,14 +1268,12 @@ class IntegrationsPage(QtWidgets.QWidget):
             "Лимит",
             "Действия",
         ])
-        services = [
-            ("Blockchair", "Активен", "****1234", "75%", "Обновить токен"),
-            ("Chainz", "Ограничен", "****5678", "90%", "Проверить лимиты"),
-            ("CoinGecko", "Ошибка", "****9012", "--", "Просмотр логов"),
-            ("OFAC Watchlist", "Активен", "N/A", "--", "Обновить"),
-        ]
-        for row, service in enumerate(services):
-            for column, value in enumerate(service):
+        for row, (service_id, status, limit, action) in enumerate(services):
+            entry = API_SERVICE_KEYS.get(service_id)
+            name = entry.display_name if entry else service_id
+            masked_key = get_masked_key(service_id)
+            values = [name, status, masked_key, limit, action]
+            for column, value in enumerate(values):
                 table.setItem(row, column, QtWidgets.QTableWidgetItem(value))
         table.horizontalHeader().setStretchLastSection(True)
         layout.addWidget(table)
