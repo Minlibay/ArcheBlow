@@ -119,13 +119,17 @@ class BlockCypherExplorerClient:
 SUPPORTED_NETWORKS: tuple[Network, ...] = tuple(BlockCypherExplorerClient._BASE_ENDPOINTS.keys())
 
 
+def _current_utc_timestamp() -> int:
+    return int(_dt.datetime.now(_dt.timezone.utc).timestamp())
+
+
 def _parse_timestamp(value: str | None) -> int:
     if not value:
-        return int(_dt.datetime.utcnow().timestamp())
+        return _current_utc_timestamp()
     try:
         return int(_dt.datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp())
     except ValueError:
-        return int(_dt.datetime.utcnow().timestamp())
+        return _current_utc_timestamp()
 
 
 def _first_address(data: Mapping[str, object]) -> str:
@@ -540,8 +544,10 @@ class DashboardPage(QtWidgets.QWidget):
             analysis_addr = f"{_short_address(record.analysis_address)} ({record.network.name.upper()})"
             counterpart = _short_address(record.counterpart)
             amount = f"{record.amount:.8f}".rstrip("0").rstrip(".") if record.amount else "0"
-            timestamp = QtCore.QDateTime.fromSecsSinceEpoch(record.timestamp).toString(
-                "dd.MM.yyyy HH:mm"
+            timestamp = (
+                QtCore.QDateTime.fromSecsSinceEpoch(record.timestamp, QtCore.QTimeZone.utc())
+                .toLocalTime()
+                .toString("dd.MM.yyyy HH:mm")
             )
             values = [tx_hash, analysis_addr, counterpart, amount, record.direction, timestamp]
             for column, value in enumerate(values):
@@ -832,8 +838,12 @@ class AnalysesPage(QtWidgets.QWidget):
                 if result.risk_level in {"high", "critical"}
                 else "Завершен"
             )
-            last_seen = max((hop.timestamp for hop in result.hops), default=int(_dt.datetime.utcnow().timestamp()))
-            timestamp = QtCore.QDateTime.fromSecsSinceEpoch(last_seen).toString("dd.MM.yyyy HH:mm")
+            last_seen = max((hop.timestamp for hop in result.hops), default=_current_utc_timestamp())
+            timestamp = (
+                QtCore.QDateTime.fromSecsSinceEpoch(last_seen, QtCore.QTimeZone.utc())
+                .toLocalTime()
+                .toString("dd.MM.yyyy HH:mm")
+            )
             values = [
                 result.address,
                 result.network.name.title(),
@@ -1347,7 +1357,9 @@ class AnalysisDetailPage(QtWidgets.QWidget):
 
             direction = "Исходящая" if hop.from_address == analysis.address else "Входящая"
             flag = "Миксер" if hop.to_address in mixer_addresses or hop.from_address in mixer_addresses else "-"
-            timestamp = QtCore.QDateTime.fromSecsSinceEpoch(hop.timestamp, QtCore.Qt.UTC).toLocalTime()
+            timestamp = QtCore.QDateTime.fromSecsSinceEpoch(
+                hop.timestamp, QtCore.QTimeZone.utc()
+            ).toLocalTime()
 
             self.transactions_table.setItem(row, 0, QtWidgets.QTableWidgetItem(hop.tx_hash))
             self.transactions_table.setItem(row, 1, QtWidgets.QTableWidgetItem(_short_address(hop.from_address)))
