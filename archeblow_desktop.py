@@ -1278,6 +1278,29 @@ class IntegrationsPage(QtWidgets.QWidget):
         table.horizontalHeader().setStretchLastSection(True)
         layout.addWidget(table)
 
+        help_box = QtWidgets.QGroupBox("Как добавить ключ")
+        help_layout = QtWidgets.QVBoxLayout()
+        help_text = QtWidgets.QLabel(
+            "Добавьте секреты в переменные окружения или создайте файл "
+            "api_keys.env/.env рядом с приложением. Каждая строка должна быть в "
+            "формате ИМЯ=значение. После изменения перезапустите приложение."
+        )
+        help_text.setWordWrap(True)
+        help_layout.addWidget(help_text)
+
+        example = QtWidgets.QPlainTextEdit()
+        example.setReadOnly(True)
+        example.setMaximumHeight(120)
+        example.setPlainText(
+            "# пример файла api_keys.env\n"
+            "BLOCKCYPHER_API_KEY=ваш_ключ\n"
+            "COINGECKO_API_KEY=...\n"
+            "CHAINZ_API_KEY=..."
+        )
+        help_layout.addWidget(example)
+        help_box.setLayout(help_layout)
+        layout.addWidget(help_box)
+
         tips = QtWidgets.QGroupBox("Подсказки")
         tips_layout = QtWidgets.QVBoxLayout()
         tips_list = QtWidgets.QListWidget()
