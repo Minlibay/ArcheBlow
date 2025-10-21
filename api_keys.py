@@ -59,10 +59,34 @@ class APIServiceKey:
 
 
 API_SERVICE_KEYS: Mapping[str, APIServiceKey] = {
+    "blockchain_com": APIServiceKey(
+        service_id="blockchain_com",
+        display_name="Blockchain.com API",
+        env_var="BLOCKCHAIN_COM_API_KEY",
+        default_value=None,
+    ),
     "blockcypher": APIServiceKey(
         service_id="blockcypher",
         display_name="BlockCypher API",
         env_var="BLOCKCYPHER_API_KEY",
+        default_value=None,
+    ),
+    "etherscan": APIServiceKey(
+        service_id="etherscan",
+        display_name="Etherscan",
+        env_var="ETHERSCAN_API_KEY",
+        default_value=None,
+    ),
+    "polygonscan": APIServiceKey(
+        service_id="polygonscan",
+        display_name="Polygonscan",
+        env_var="POLYGONSCAN_API_KEY",
+        default_value=None,
+    ),
+    "trongrid": APIServiceKey(
+        service_id="trongrid",
+        display_name="TronGrid",
+        env_var="TRONGRID_API_KEY",
         default_value=None,
     ),
     "blockchair": APIServiceKey(

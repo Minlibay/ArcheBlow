@@ -29,116 +29,17 @@ from archeblow_service import (
     ArcheBlowAnalyzer,
     HeuristicMixerClient,
     Network,
-    TransactionHop,
 )
 from analysis_store import AnalysisStore
-from api_keys import API_SERVICE_KEYS, get_api_key, get_masked_key
-
-
-class UnsupportedNetworkError(RuntimeError):
-    """Raised when the selected network lacks a configured public API."""
-
-
-class BlockCypherExplorerClient:
-    """Explorer client that pulls transactions from the free BlockCypher API."""
-
-    _BASE_ENDPOINTS: Mapping[Network, str] = {
-        Network.BITCOIN: "https://api.blockcypher.com/v1/btc/main",
-    }
-
-    def __init__(
-        self,
-        network: Network,
-        *,
-        session: httpx.AsyncClient | None = None,
-        token: str | None = None,
-    ) -> None:
-        if network not in self._BASE_ENDPOINTS:
-            raise UnsupportedNetworkError(
-                f"Сеть {network.value} не поддерживается публичным API BlockCypher."
-            )
-        self.network = network
-        self._base_url = self._BASE_ENDPOINTS[network]
-        self._session = session
-        self._token = token
-
-    async def fetch_transaction_hops(self, address: str) -> Sequence[TransactionHop]:
-        url = f"{self._base_url}/addrs/{address}/full"
-        params = {"limit": 50, "txlimit": 50}
-        if self._token:
-            params["token"] = self._token
-        close_session = False
-        session = self._session
-        if session is None:
-            timeout = httpx.Timeout(20.0, connect=10.0, read=20.0)
-            session = httpx.AsyncClient(timeout=timeout)
-            close_session = True
-        try:
-            response = await session.get(url, params=params)
-            response.raise_for_status()
-        except httpx.HTTPStatusError as exc:  # pragma: no cover - network errors handled at runtime
-            raise RuntimeError(
-                f"BlockCypher API вернул ошибку {exc.response.status_code}: {exc.response.text}"
-            ) from exc
-        except httpx.HTTPError as exc:  # pragma: no cover - network errors handled at runtime
-            raise RuntimeError("Ошибка сети при обращении к BlockCypher API") from exc
-        finally:
-            if close_session:
-                await session.aclose()
-
-        payload = response.json()
-        transactions = payload.get("txs", [])
-        hops: list[TransactionHop] = []
-
-        for tx in transactions:
-            tx_hash = tx.get("hash", "")
-            timestamp = _parse_timestamp(tx.get("confirmed") or tx.get("received"))
-            inputs = tx.get("inputs", [])
-            outputs = tx.get("outputs", [])
-            for inp in inputs:
-                from_addr = _first_address(inp)
-                for out in outputs:
-                    to_addr = _first_address(out)
-                    amount_satoshi = out.get("value") or 0
-                    amount_btc = amount_satoshi / 100_000_000 if amount_satoshi else 0.0
-                    hop = TransactionHop(
-                        tx_hash=tx_hash,
-                        from_address=from_addr,
-                        to_address=to_addr,
-                        amount=amount_btc,
-                        timestamp=timestamp,
-                        metadata={"block_height": tx.get("block_height")},
-                    )
-                    hops.append(hop)
-
-        hops.sort(key=lambda hop: hop.timestamp, reverse=True)
-        # Limit to keep the UI responsive.
-        return hops[:200]
-
-
-SUPPORTED_NETWORKS: tuple[Network, ...] = tuple(BlockCypherExplorerClient._BASE_ENDPOINTS.keys())
-
-
+from api_keys import API_SERVICE_KEYS, get_masked_key
+from explorers import (
+    ExplorerAPIError,
+    SUPPORTED_NETWORKS,
+    UnsupportedNetworkError,
+    create_explorer_clients,
+)
 def _current_utc_timestamp() -> int:
     return int(_dt.datetime.now(_dt.timezone.utc).timestamp())
-
-
-def _parse_timestamp(value: str | None) -> int:
-    if not value:
-        return _current_utc_timestamp()
-    try:
-        return int(_dt.datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp())
-    except ValueError:
-        return _current_utc_timestamp()
-
-
-def _first_address(data: Mapping[str, object]) -> str:
-    addresses = data.get("addresses")
-    if isinstance(addresses, list) and addresses:
-        return str(addresses[0])
-    if isinstance(addresses, str):
-        return addresses
-    return "Неизвестно"
 
 
 _RISK_BADGE = {
@@ -686,13 +587,17 @@ class NewAnalysisPage(QtWidgets.QWidget):
         self.log_output.append(
             f"Старт анализа адреса {address} в сети {network.name.title()}…"
         )
-        self.log_output.append("Подключение к бесплатному API BlockCypher…")
+        self.log_output.append("Подключение к публичным API выбранной сети…")
 
         try:
             result = await self._perform_analysis(address, network)
         except UnsupportedNetworkError as exc:
             self._handle_error(str(exc))
             QtWidgets.QMessageBox.warning(self, "Сеть не поддерживается", str(exc))
+            return
+        except ExplorerAPIError as exc:
+            self._handle_error(str(exc))
+            QtWidgets.QMessageBox.warning(self, "Ошибка API", str(exc))
             return
         except Exception as exc:
             self._handle_error(f"Ошибка анализа: {exc}")
@@ -733,10 +638,15 @@ class NewAnalysisPage(QtWidgets.QWidget):
 
     async def _perform_analysis(self, address: str, network: Network) -> AddressAnalysisResult:
         self.log_output.append("Запрос истории транзакций…")
-        blockcypher_token = get_api_key("blockcypher")
-        explorer = BlockCypherExplorerClient(network, token=blockcypher_token)
+        explorers = create_explorer_clients(network)
+        for client in explorers:
+            friendly_name = client.__class__.__name__.replace("ExplorerClient", " API")
+            self.log_output.append(f"Используется {friendly_name} для получения данных…")
         mixer_client = HeuristicMixerClient(watchlist=_DEFAULT_MIXER_WATCHLIST)
-        analyzer = ArcheBlowAnalyzer(explorer_clients=[explorer], mixer_clients=[mixer_client])
+        analyzer = ArcheBlowAnalyzer(
+            explorer_clients=list(explorers),
+            mixer_clients=[mixer_client],
+        )
         result = await analyzer.analyze(address, network)
         if not result.hops:
             self.log_output.append("API не вернуло транзакции — возможно, адрес новый или данные ограничены.")
@@ -1457,7 +1367,11 @@ class IntegrationsPage(QtWidgets.QWidget):
         layout.addWidget(title)
 
         services = [
+            ("blockchain_com", "Активен", "∞", "Проверить лимит"),
             ("blockcypher", "Активен", "60%", "Синхронизировать"),
+            ("etherscan", "Требует ключ", "--", "Добавить ключ"),
+            ("polygonscan", "Требует ключ", "--", "Добавить ключ"),
+            ("trongrid", "Требует ключ", "--", "Добавить ключ"),
             ("blockchair", "Активен", "75%", "Обновить токен"),
             ("chainz", "Ограничен", "90%", "Проверить лимиты"),
             ("coingecko", "Ошибка", "--", "Просмотр логов"),
@@ -1498,9 +1412,11 @@ class IntegrationsPage(QtWidgets.QWidget):
         example.setMaximumHeight(120)
         example.setPlainText(
             "# пример файла api_keys.env\n"
-            "BLOCKCYPHER_API_KEY=ваш_ключ\n"
-            "COINGECKO_API_KEY=...\n"
-            "CHAINZ_API_KEY=..."
+            "BLOCKCHAIN_COM_API_KEY=ваш_ключ\n"
+            "BLOCKCYPHER_API_KEY=...\n"
+            "ETHERSCAN_API_KEY=...\n"
+            "TRONGRID_API_KEY=...\n"
+            "POLYGONSCAN_API_KEY=..."
         )
         help_layout.addWidget(example)
         help_box.setLayout(help_layout)
