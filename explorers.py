@@ -237,9 +237,18 @@ class EtherscanExplorerClient(_BaseExplorerClient):
         result = payload.get("result", [])
         if status != "1":
             message = str(payload.get("message") or "")
+            if isinstance(result, Mapping):
+                result_detail = result.get("message") or result.get("result")
+            else:
+                result_detail = result
+            detail_str = str(result_detail or "")
             if message.lower() != "no transactions found":
+                if detail_str and detail_str.lower() != message.lower():
+                    error_text = f"{message} ({detail_str})"
+                else:
+                    error_text = message or detail_str or "Unknown error"
                 raise ExplorerAPIError(
-                    f"Etherscan API вернул сообщение об ошибке: {message or 'Unknown error'}"
+                    f"Etherscan API вернул сообщение об ошибке: {error_text}"
                 )
             return []
         if not isinstance(result, Iterable):
