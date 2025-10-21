@@ -20,6 +20,7 @@ import datetime as _dt
 import math
 from typing import Iterable, Mapping, Sequence
 
+import httpx
 from PySide6 import QtCore, QtGui, QtWidgets
 from qasync import QEventLoop, asyncSlot
 
