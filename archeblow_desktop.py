@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+import math
 from typing import Iterable
 
 from PySide6 import QtCore, QtGui, QtWidgets
@@ -498,12 +499,297 @@ class AnalysesPage(QtWidgets.QWidget):
                 self.open_details.emit(address_item.text())
 
 
-class GraphPlaceholder(QtWidgets.QLabel):
-    def __init__(self, text: str) -> None:
-        super().__init__(text)
-        self.setAlignment(QtCore.Qt.AlignCenter)
-        self.setMinimumHeight(240)
-        self.setStyleSheet("color: #8b949e; border: 2px dashed #30363d; border-radius: 12px; padding: 24px;")
+@dataclass(frozen=True)
+class GraphNode:
+    """Represents an address in the relationship graph."""
+
+    node_id: str
+    label: str
+    category: str
+    risk_level: str
+    total_flow: float
+
+
+@dataclass(frozen=True)
+class GraphEdge:
+    """Connects two nodes in the relationship graph."""
+
+    source: str
+    target: str
+    relation: str
+    volume: float
+
+
+class GraphNodeItem(QtWidgets.QGraphicsEllipseItem):
+    """Visual node with styling based on risk and category."""
+
+    def __init__(self, node: GraphNode, radius: float = 32) -> None:
+        super().__init__(-radius, -radius, radius * 2, radius * 2)
+        self.node = node
+        self.edges: list[GraphEdgeItem] = []
+        self.setFlags(
+            QtWidgets.QGraphicsItem.ItemIsMovable
+            | QtWidgets.QGraphicsItem.ItemIsSelectable
+        )
+        self.setAcceptHoverEvents(True)
+        self.setZValue(1)
+        self._update_brush()
+
+        label = QtWidgets.QGraphicsSimpleTextItem(node.label, self)
+        label.setBrush(QtGui.QBrush(QtCore.Qt.white))
+        label_rect = label.boundingRect()
+        label.setPos(-label_rect.width() / 2, -label_rect.height() / 2)
+
+    def _update_brush(self) -> None:
+        palette = {
+            "Высокий": QtGui.QColor("#f85149"),
+            "Средний": QtGui.QColor("#d29922"),
+            "Низкий": QtGui.QColor("#238636"),
+        }
+        color = palette.get(self.node.risk_level, QtGui.QColor("#58a6ff"))
+        gradient = QtGui.QRadialGradient(0, 0, 36)
+        gradient.setColorAt(0.0, color.lighter(140))
+        gradient.setColorAt(1.0, color.darker(150))
+        self.setBrush(QtGui.QBrush(gradient))
+        pen = QtGui.QPen(QtGui.QColor("#0d1117"))
+        pen.setWidth(2)
+        self.setPen(pen)
+
+    def hoverEnterEvent(self, event: QtWidgets.QGraphicsSceneHoverEvent) -> None:  # noqa: N802
+        tooltip = (
+            f"Категория: {self.node.category}\n"
+            f"Риск: {self.node.risk_level}\n"
+            f"Оборот: {self.node.total_flow:.2f} BTC"
+        )
+        QtWidgets.QToolTip.showText(event.screenPos(), tooltip)
+        super().hoverEnterEvent(event)
+
+    def itemChange(self, change: QtWidgets.QGraphicsItem.GraphicsItemChange, value: QtCore.QVariant) -> QtCore.QVariant:  # noqa: N802
+        if change == QtWidgets.QGraphicsItem.ItemPositionHasChanged:
+            for edge in self.edges:
+                edge.update_geometry()
+        return super().itemChange(change, value)
+
+    def add_edge(self, edge: GraphEdgeItem) -> None:
+        self.edges.append(edge)
+
+
+class GraphEdgeItem(QtWidgets.QGraphicsPathItem):
+    """Curved edge with arrow head."""
+
+    def __init__(self, source: GraphNodeItem, target: GraphNodeItem, edge: GraphEdge) -> None:
+        super().__init__()
+        self.source_item = source
+        self.target_item = target
+        self.edge = edge
+        self.setZValue(0)
+        self.setPen(QtGui.QPen(QtGui.QColor("#58a6ff"), 1.6))
+        self.arrow_head = QtGui.QPolygonF()
+        self.update_geometry()
+
+    def update_geometry(self) -> None:
+        src = self.source_item.scenePos()
+        dst = self.target_item.scenePos()
+        path = QtGui.QPainterPath(src)
+        mid = (src + dst) / 2
+        offset = QtCore.QPointF(0, -40)
+        path.quadTo(mid + offset, dst)
+        self.setPath(path)
+
+        arrow_size = 8
+        line = QtCore.QLineF(self.path().pointAtPercent(0.95), self.path().pointAtPercent(1.0))
+        angle = math.radians(-line.angle())
+        dest_point = line.p2()
+        arrow_p1 = dest_point + QtCore.QPointF(
+            math.sin(angle + math.pi / 3) * arrow_size,
+            math.cos(angle + math.pi / 3) * arrow_size,
+        )
+        arrow_p2 = dest_point + QtCore.QPointF(
+            math.sin(angle - math.pi / 3) * arrow_size,
+            math.cos(angle - math.pi / 3) * arrow_size,
+        )
+        arrow = QtGui.QPolygonF([dest_point, arrow_p1, arrow_p2])
+        self.arrow_head = arrow
+
+    def paint(self, painter: QtGui.QPainter, option: QtWidgets.QStyleOptionGraphicsItem, widget: QtWidgets.QWidget | None = None) -> None:
+        super().paint(painter, option, widget)
+        painter.setBrush(QtGui.QBrush(QtGui.QColor("#58a6ff")))
+        painter.drawPolygon(self.arrow_head)
+
+
+class GraphView(QtWidgets.QGraphicsView):
+    """Interactive view with wheel zoom and smooth rendering."""
+
+    zoom_changed = QtCore.Signal(int)
+
+    def __init__(self, scene: QtWidgets.QGraphicsScene) -> None:
+        super().__init__(scene)
+        self.setRenderHints(
+            QtGui.QPainter.Antialiasing
+            | QtGui.QPainter.TextAntialiasing
+            | QtGui.QPainter.SmoothPixmapTransform
+        )
+        self.setDragMode(QtWidgets.QGraphicsView.ScrollHandDrag)
+        self.setTransformationAnchor(QtWidgets.QGraphicsView.AnchorUnderMouse)
+        self.setBackgroundBrush(QtGui.QColor("#0d1117"))
+        self._zoom_level = 100
+
+    def wheelEvent(self, event: QtGui.QWheelEvent) -> None:  # noqa: N802 - Qt API
+        delta = event.angleDelta().y()
+        step = 5 if event.modifiers() & QtCore.Qt.ControlModifier else 10
+        self.set_zoom(self._zoom_level + step if delta > 0 else self._zoom_level - step)
+        event.accept()
+
+    def set_zoom(self, value: int) -> None:
+        value = max(30, min(250, value))
+        self._zoom_level = value
+        self.resetTransform()
+        self.scale(value / 100.0, value / 100.0)
+        self.zoom_changed.emit(self._zoom_level)
+
+    def zoom_level(self) -> int:
+        return self._zoom_level
+
+
+class GraphWidget(QtWidgets.QWidget):
+    """Full graph widget with controls for zoom and filtering."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
+
+        controls = QtWidgets.QHBoxLayout()
+        controls.setSpacing(10)
+
+        controls.addWidget(QtWidgets.QLabel("Риск:"))
+        self.risk_filter = QtWidgets.QComboBox()
+        self.risk_filter.addItems(["Все", "Высокий", "Средний", "Низкий"])
+        controls.addWidget(self.risk_filter)
+
+        controls.addWidget(QtWidgets.QLabel("Категория:"))
+        self.category_filter = QtWidgets.QComboBox()
+        self.category_filter.addItems(["Все", "Mixer", "Exchange", "Wallet", "Merchant"])
+        controls.addWidget(self.category_filter)
+
+        controls.addStretch(1)
+
+        self.zoom_out_btn = QtWidgets.QToolButton()
+        self.zoom_out_btn.setText("-")
+        controls.addWidget(self.zoom_out_btn)
+
+        self.zoom_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.zoom_slider.setRange(30, 250)
+        self.zoom_slider.setValue(100)
+        self.zoom_slider.setFixedWidth(160)
+        controls.addWidget(self.zoom_slider)
+
+        self.zoom_in_btn = QtWidgets.QToolButton()
+        self.zoom_in_btn.setText("+")
+        controls.addWidget(self.zoom_in_btn)
+
+        layout.addLayout(controls)
+
+        self.scene = QtWidgets.QGraphicsScene()
+        self.scene.setSceneRect(-400, -300, 800, 600)
+        self.view = GraphView(self.scene)
+        layout.addWidget(self.view)
+
+        self.nodes: dict[str, GraphNodeItem] = {}
+        self.edges: list[GraphEdgeItem] = []
+
+        self.build_demo_graph()
+        self._connect_signals()
+
+    def _connect_signals(self) -> None:
+        self.risk_filter.currentTextChanged.connect(self._apply_filters)
+        self.category_filter.currentTextChanged.connect(self._apply_filters)
+        self.zoom_slider.valueChanged.connect(self.view.set_zoom)
+        self.zoom_in_btn.clicked.connect(lambda: self.zoom_slider.setValue(self.zoom_slider.value() + 10))
+        self.zoom_out_btn.clicked.connect(lambda: self.zoom_slider.setValue(self.zoom_slider.value() - 10))
+        self.view.zoom_changed.connect(self._sync_zoom_slider)
+
+    def build_demo_graph(self, address: str | None = None) -> None:
+        main_label = address or "Главный"
+        nodes = [
+            GraphNode("addr_main", main_label, "Wallet", "Высокий", 250.0),
+            GraphNode("addr_mix", "Миксер", "Mixer", "Высокий", 110.0),
+            GraphNode("addr_exch", "Биржа", "Exchange", "Средний", 90.0),
+            GraphNode("addr_merc", "Мерчант", "Merchant", "Низкий", 40.0),
+            GraphNode("addr_peer", "Контрагент", "Wallet", "Средний", 55.0),
+        ]
+        edges = [
+            GraphEdge("addr_main", "addr_mix", "Перевод", 125.0),
+            GraphEdge("addr_mix", "addr_exch", "Депозит", 80.0),
+            GraphEdge("addr_main", "addr_peer", "Оплата", 20.0),
+            GraphEdge("addr_peer", "addr_merc", "Платеж", 15.0),
+            GraphEdge("addr_exch", "addr_main", "Вывод", 30.0),
+        ]
+        self.load_graph(nodes, edges)
+
+    def load_graph(self, nodes: Iterable[GraphNode], edges: Iterable[GraphEdge]) -> None:
+        self.scene.clear()
+        self.nodes.clear()
+        self.edges.clear()
+
+        nodes = list(nodes)
+        radius = 200
+        for index, node in enumerate(nodes):
+            angle = (2 * math.pi * index) / max(len(nodes), 1)
+            x = math.cos(angle) * radius
+            y = math.sin(angle) * radius
+            item = GraphNodeItem(node)
+            item.setPos(x, y)
+            self.scene.addItem(item)
+            self.nodes[node.node_id] = item
+
+        for edge in edges:
+            source_item = self.nodes.get(edge.source)
+            target_item = self.nodes.get(edge.target)
+            if not source_item or not target_item:
+                continue
+            edge_item = GraphEdgeItem(source_item, target_item, edge)
+            self.scene.addItem(edge_item)
+            source_item.add_edge(edge_item)
+            target_item.add_edge(edge_item)
+            self.edges.append(edge_item)
+
+        for item in self.nodes.values():
+            halo = QtWidgets.QGraphicsEllipseItem(-40, -40, 80, 80)
+            halo.setBrush(QtGui.QBrush(QtGui.QColor(88, 166, 255, 40)))
+            halo.setPen(QtGui.QPen(QtCore.Qt.NoPen))
+            halo.setParentItem(item)
+            halo.setZValue(-1)
+
+        self._apply_filters()
+
+    def _apply_filters(self) -> None:
+        risk = self.risk_filter.currentText()
+        category = self.category_filter.currentText()
+
+        for node_id, item in self.nodes.items():
+            node = item.node
+            visible = True
+            if risk != "Все" and node.risk_level != risk:
+                visible = False
+            if category != "Все" and node.category != category:
+                visible = False
+            item.setVisible(visible)
+
+        for edge_item in self.edges:
+            source_visible = edge_item.source_item.isVisible()
+            target_visible = edge_item.target_item.isVisible()
+            edge_item.setVisible(source_visible and target_visible)
+
+    def _sync_zoom_slider(self, value: int) -> None:
+        if self.zoom_slider.value() == value:
+            return
+        self.zoom_slider.blockSignals(True)
+        self.zoom_slider.setValue(value)
+        self.zoom_slider.blockSignals(False)
+
+
 
 
 class AnalysisDetailPage(QtWidgets.QWidget):
@@ -521,14 +807,16 @@ class AnalysisDetailPage(QtWidgets.QWidget):
 
         self.tabs = QtWidgets.QTabWidget()
         self.tabs.addTab(self._create_overview(), "Обзор")
-        self.tabs.addTab(GraphPlaceholder("Граф связей появится здесь"), "Граф")
+        self.graph_widget = GraphWidget()
+        self.tabs.addTab(self.graph_widget, "Граф")
         self.tabs.addTab(self._create_transactions_tab(), "Транзакции")
-        self.tabs.addTab(GraphPlaceholder("Прогнозные модели в разработке"), "Прогнозы")
+        self.tabs.addTab(self._create_forecast_tab(), "Прогнозы")
         self.tabs.addTab(self._create_report_tab(), "Отчет")
         layout.addWidget(self.tabs)
 
     def set_address(self, address: str, network: str) -> None:
         self.header.setText(f"Адрес: {address} | Сеть: {network} | Обновлено: только что")
+        self.graph_widget.build_demo_graph(address)
 
     def _create_overview(self) -> QtWidgets.QWidget:
         widget = QtWidgets.QWidget()
@@ -611,6 +899,29 @@ class AnalysisDetailPage(QtWidgets.QWidget):
             table.setItem(row, 4, QtWidgets.QTableWidgetItem("Подозрительная"))
         table.horizontalHeader().setStretchLastSection(True)
         layout.addWidget(table)
+
+        return widget
+
+    def _create_forecast_tab(self) -> QtWidgets.QWidget:
+        widget = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(widget)
+        layout.setSpacing(16)
+        layout.setContentsMargins(24, 24, 24, 24)
+
+        info = QtWidgets.QLabel(
+            "Прогнозные модели готовятся к интеграции."
+            "\nСценарии будут доступны после обучения моделей."
+        )
+        info.setWordWrap(True)
+        info.setStyleSheet("color: #8b949e; font-size: 13px;")
+        layout.addWidget(info)
+
+        card = QtWidgets.QGroupBox("Запланированные сценарии")
+        card_layout = QtWidgets.QVBoxLayout(card)
+        card_layout.addWidget(QtWidgets.QLabel("• Детекция аномалий по графу связей"))
+        card_layout.addWidget(QtWidgets.QLabel("• Прогнозирование рисковых потоков"))
+        card_layout.addWidget(QtWidgets.QLabel("• Индикаторы эскалации для команд мониторинга"))
+        layout.addWidget(card)
 
         return widget
 
