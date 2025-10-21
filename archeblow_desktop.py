@@ -1180,6 +1180,29 @@ class AnalysisDetailPage(QtWidgets.QWidget):
 
         return widget
 
+    def _create_forecast_tab(self) -> QtWidgets.QWidget:
+        widget = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(widget)
+        layout.setSpacing(16)
+        layout.setContentsMargins(24, 24, 24, 24)
+
+        info = QtWidgets.QLabel(
+            "Прогнозные модели готовятся к интеграции."
+            "\nСценарии будут доступны после обучения моделей."
+        )
+        info.setWordWrap(True)
+        info.setStyleSheet("color: #8b949e; font-size: 13px;")
+        layout.addWidget(info)
+
+        card = QtWidgets.QGroupBox("Запланированные сценарии")
+        card_layout = QtWidgets.QVBoxLayout(card)
+        card_layout.addWidget(QtWidgets.QLabel("• Детекция аномалий по графу связей"))
+        card_layout.addWidget(QtWidgets.QLabel("• Прогнозирование рисковых потоков"))
+        card_layout.addWidget(QtWidgets.QLabel("• Индикаторы эскалации для команд мониторинга"))
+        layout.addWidget(card)
+
+        return widget
+
     def _create_report_tab(self) -> QtWidgets.QWidget:
         widget = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(widget)
