@@ -31,6 +31,7 @@ from archeblow_service import (
     Network,
     TransactionHop,
 )
+from analysis_store import AnalysisStore
 from api_keys import API_SERVICE_KEYS, get_api_key, get_masked_key
 
 
@@ -113,6 +114,9 @@ class BlockCypherExplorerClient:
         hops.sort(key=lambda hop: hop.timestamp, reverse=True)
         # Limit to keep the UI responsive.
         return hops[:200]
+
+
+SUPPORTED_NETWORKS: tuple[Network, ...] = tuple(BlockCypherExplorerClient._BASE_ENDPOINTS.keys())
 
 
 def _parse_timestamp(value: str | None) -> int:
@@ -390,11 +394,80 @@ class TopBar(QtWidgets.QFrame):
         layout.addWidget(self.notifications, 1)
 
 
-class DashboardPage(QtWidgets.QWidget):
-    """Dashboard showing active analyses, metrics and event log."""
+class RiskDistributionWidget(QtWidgets.QWidget):
+    """Displays a simple distribution of risk levels using progress bars."""
+
+    _ORDER: tuple[tuple[str, str, str], ...] = (
+        ("critical", "Критический", "#f85149"),
+        ("high", "Высокий", "#d29922"),
+        ("moderate", "Средний", "#bf7fff"),
+        ("low", "Низкий", "#2ea043"),
+    )
 
     def __init__(self) -> None:
         super().__init__()
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+
+        self._bars: dict[str, QtWidgets.QProgressBar] = {}
+        for key, label, color in self._ORDER:
+            bar = QtWidgets.QProgressBar()
+            bar.setRange(0, 100)
+            bar.setValue(0)
+            bar.setFormat(f"{label}: 0 (0%)")
+            bar.setStyleSheet(
+                """
+                QProgressBar {
+                    background: #0d1117;
+                    border: 1px solid #30363d;
+                    border-radius: 8px;
+                    text-align: center;
+                    color: #c9d1d9;
+                }
+                QProgressBar::chunk {
+                    border-radius: 6px;
+                }
+                """
+            )
+            bar.setProperty("chunk_color", color)
+            layout.addWidget(bar)
+            self._bars[key] = bar
+
+    def update_distribution(self, distribution: Mapping[str, int]) -> None:
+        total = sum(distribution.values()) or 1
+        for key, label, color in self._ORDER:
+            bar = self._bars[key]
+            count = distribution.get(key, 0)
+            percent = int(round((count / total) * 100))
+            # Apply chunk color dynamically.
+            bar.setStyleSheet(
+                """
+                QProgressBar {
+                    background: #0d1117;
+                    border: 1px solid #30363d;
+                    border-radius: 8px;
+                    text-align: center;
+                    color: #c9d1d9;
+                }
+                QProgressBar::chunk {
+                    background-color: %s;
+                    border-radius: 6px;
+                }
+                """
+                % color
+            )
+            bar.setValue(percent)
+            bar.setFormat(f"{label}: {count} ({percent}%)")
+
+
+class DashboardPage(QtWidgets.QWidget):
+    """Dashboard showing live metrics based on completed analyses."""
+
+    def __init__(self, store: AnalysisStore) -> None:
+        super().__init__()
+        self._store = store
+
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(16)
@@ -403,46 +476,88 @@ class DashboardPage(QtWidgets.QWidget):
         cards.setHorizontalSpacing(16)
         cards.setVerticalSpacing(16)
 
-        cards.addWidget(self._metric_card("Активные проверки", "12", "🟢"), 0, 0)
-        cards.addWidget(self._metric_card("Завершенные", "48", "✅"), 0, 1)
-        cards.addWidget(self._metric_card("Высокий риск", "5", "🛑"), 0, 2)
-        cards.addWidget(self._metric_card("Средний риск", "9", "⚠️"), 0, 3)
+        self._metric_labels: dict[str, QtWidgets.QLabel] = {}
+        card_specs = [
+            ("Всего анализов", "total", "📊"),
+            ("Высокий риск", "high", "🛑"),
+            ("Средний риск", "moderate", "⚠️"),
+            ("Низкий риск", "low", "✅"),
+        ]
+        for column, (title, key, icon) in enumerate(card_specs):
+            card, value_label = self._metric_card(title, icon)
+            cards.addWidget(card, 0, column)
+            self._metric_labels[key] = value_label
         layout.addLayout(cards)
 
         distribution = QtWidgets.QGroupBox("Распределение индекса риска")
         distribution.setLayout(QtWidgets.QVBoxLayout())
-        distribution.layout().addWidget(self._risk_chart_placeholder())
+        self.risk_distribution = RiskDistributionWidget()
+        distribution.layout().addWidget(self.risk_distribution)
         layout.addWidget(distribution)
 
         transactions = QtWidgets.QGroupBox("Последние транзакции")
         tx_layout = QtWidgets.QVBoxLayout()
-        table = QtWidgets.QTableWidget(5, 4)
-        table.setHorizontalHeaderLabels(["Адрес", "Сеть", "Сумма", "Статус"])
-        for row in range(5):
-            table.setItem(row, 0, QtWidgets.QTableWidgetItem(f"0xABCD{row:02d}"))
-            table.setItem(row, 1, QtWidgets.QTableWidgetItem("Ethereum"))
-            table.setItem(row, 2, QtWidgets.QTableWidgetItem(f"{10 + row * 2:.2f} ETH"))
-            table.setItem(row, 3, QtWidgets.QTableWidgetItem("На проверке"))
-        table.horizontalHeader().setStretchLastSection(True)
-        tx_layout.addWidget(table)
+        self.tx_table = QtWidgets.QTableWidget(0, 6)
+        self.tx_table.setHorizontalHeaderLabels(
+            [
+                "TX Hash",
+                "Адрес",
+                "Контрагент",
+                "Сумма (BTC)",
+                "Направление",
+                "Время",
+            ]
+        )
+        self.tx_table.horizontalHeader().setStretchLastSection(True)
+        tx_layout.addWidget(self.tx_table)
         transactions.setLayout(tx_layout)
         layout.addWidget(transactions)
 
         notifications = QtWidgets.QGroupBox("Центр уведомлений")
         notif_layout = QtWidgets.QVBoxLayout()
-        log = QtWidgets.QListWidget()
-        log.addItems(
-            [
-                "[WARN] Лимит API Chainz достигает 80%.",
-                "[ERROR] Ошибка авторизации CoinGecko, требуется обновить токен.",
-                "[INFO] Анализ 0xACF8 завершен успешно.",
-            ]
-        )
-        notif_layout.addWidget(log)
+        self.notifications_list = QtWidgets.QListWidget()
+        notif_layout.addWidget(self.notifications_list)
         notifications.setLayout(notif_layout)
         layout.addWidget(notifications)
 
-    def _metric_card(self, title: str, value: str, icon: str) -> QtWidgets.QFrame:
+        self._store.result_added.connect(self._refresh)
+        self._refresh()
+
+    def _refresh(self) -> None:
+        metrics = self._store.metrics()
+        for key, label in self._metric_labels.items():
+            label.setText(str(metrics.get(key, 0)))
+        self.risk_distribution.update_distribution(self._store.risk_distribution())
+        self._refresh_transactions()
+        self._refresh_notifications()
+
+    def _refresh_transactions(self) -> None:
+        records = self._store.recent_transactions(limit=10)
+        self.tx_table.setRowCount(len(records))
+        for row, record in enumerate(records):
+            tx_hash_raw = record.tx_hash or "—"
+            tx_hash = tx_hash_raw if len(tx_hash_raw) <= 16 else f"{tx_hash_raw[:12]}…"
+            analysis_addr = f"{_short_address(record.analysis_address)} ({record.network.name.upper()})"
+            counterpart = _short_address(record.counterpart)
+            amount = f"{record.amount:.8f}".rstrip("0").rstrip(".") if record.amount else "0"
+            timestamp = QtCore.QDateTime.fromSecsSinceEpoch(record.timestamp).toString(
+                "dd.MM.yyyy HH:mm"
+            )
+            values = [tx_hash, analysis_addr, counterpart, amount, record.direction, timestamp]
+            for column, value in enumerate(values):
+                self.tx_table.setItem(row, column, QtWidgets.QTableWidgetItem(value))
+
+    def _refresh_notifications(self) -> None:
+        entries = self._store.recent_notes(limit=10)
+        self.notifications_list.clear()
+        if not entries:
+            self.notifications_list.addItem("Пока нет комментариев по рискам.")
+            return
+        self.notifications_list.addItems(entries)
+
+    def _metric_card(
+        self, title: str, icon: str
+    ) -> tuple[QtWidgets.QFrame, QtWidgets.QLabel]:
         card = QtWidgets.QFrame()
         card.setStyleSheet(
             "background: #161b22; border: 1px solid #30363d; border-radius: 12px; padding: 16px;"
@@ -452,19 +567,10 @@ class DashboardPage(QtWidgets.QWidget):
         title_label = QtWidgets.QLabel(title)
         title_label.setStyleSheet("color: #8b949e; font-size: 12px;")
         layout.addWidget(title_label)
-        value_label = QtWidgets.QLabel(value)
+        value_label = QtWidgets.QLabel("0")
         value_label.setStyleSheet("color: #ffffff; font-size: 24px; font-weight: 600;")
         layout.addWidget(value_label)
-        return card
-
-    def _risk_chart_placeholder(self) -> QtWidgets.QWidget:
-        placeholder = QtWidgets.QLabel("Диаграмма распределения (пока в разработке)")
-        placeholder.setAlignment(QtCore.Qt.AlignCenter)
-        placeholder.setMinimumHeight(160)
-        placeholder.setStyleSheet(
-            "color: #8b949e; border: 2px dashed #30363d; border-radius: 12px; padding: 24px;"
-        )
-        return placeholder
+        return card, value_label
 
 
 class NewAnalysisPage(QtWidgets.QWidget):
@@ -491,8 +597,11 @@ class NewAnalysisPage(QtWidgets.QWidget):
         form.addRow("Адрес/кошелек", self.address_input)
 
         self.network_combo = QtWidgets.QComboBox()
-        for network in Network:
-            self.network_combo.addItem(network.name.title(), network)
+        for network in SUPPORTED_NETWORKS:
+            self.network_combo.addItem(network.name.title(), network.value)
+        if self.network_combo.count() == 0:
+            self.network_combo.addItem("Нет доступных сетей", None)
+            self.network_combo.setEnabled(False)
         form.addRow("Блокчейн-сеть", self.network_combo)
 
         depth_group = QtWidgets.QGroupBox("Глубина анализа")
@@ -553,18 +662,28 @@ class NewAnalysisPage(QtWidgets.QWidget):
             QtWidgets.QMessageBox.warning(self, "Адрес не указан", "Введите адрес для анализа.")
             return
 
+        network = self._resolve_selected_network()
+        if network is None:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Сеть не выбрана",
+                "Выберите поддерживаемую сеть для анализа.",
+            )
+            self.log_output.append("Выберите поддерживаемую сеть для анализа.")
+            return
+
         self.launch_button.setDisabled(True)
         self.progress.setVisible(True)
         self.progress.setRange(0, 0)
-        selected_network = self.network_combo.currentData()
-        if not isinstance(selected_network, Network):
-            self._handle_error("Выберите поддерживаемую сеть для анализа.")
-            return
-
+        self.progress.setValue(0)
+        self.log_output.clear()
+        self.log_output.append(
+            f"Старт анализа адреса {address} в сети {network.name.title()}…"
+        )
         self.log_output.append("Подключение к бесплатному API BlockCypher…")
 
         try:
-            result = await self._perform_analysis(address, selected_network)
+            result = await self._perform_analysis(address, network)
         except UnsupportedNetworkError as exc:
             self._handle_error(str(exc))
             QtWidgets.QMessageBox.warning(self, "Сеть не поддерживается", str(exc))
@@ -585,6 +704,26 @@ class NewAnalysisPage(QtWidgets.QWidget):
 
         self.log_output.append("Анализ завершен. Результаты доступны на вкладке 'Анализы'.")
         self.analysis_completed.emit(result)
+
+    def _resolve_selected_network(self) -> Network | None:
+        data = self.network_combo.currentData()
+        if isinstance(data, Network):
+            return data
+        if isinstance(data, str) and data:
+            try:
+                return Network(data)
+            except ValueError:
+                try:
+                    return Network(data.lower())
+                except ValueError:
+                    return None
+        text = self.network_combo.currentText().strip().lower()
+        if not text:
+            return None
+        try:
+            return Network(text)
+        except ValueError:
+            return None
 
     async def _perform_analysis(self, address: str, network: Network) -> AddressAnalysisResult:
         self.log_output.append("Запрос истории транзакций…")
@@ -610,21 +749,23 @@ class AnalysesPage(QtWidgets.QWidget):
 
     open_details = QtCore.Signal(AddressAnalysisResult)
 
-    def __init__(self) -> None:
+    def __init__(self, store: AnalysisStore) -> None:
         super().__init__()
+        self._store = store
+
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(16)
 
         filter_bar = QtWidgets.QHBoxLayout()
         self.status_filter = QtWidgets.QComboBox()
-        self.status_filter.addItems(["Все", "На проверке", "Завершен", "Требует внимания"])
+        self.status_filter.addItems(["Все", "Завершен", "Требует внимания"])
         filter_bar.addWidget(QtWidgets.QLabel("Статус:"))
         filter_bar.addWidget(self.status_filter)
 
         self.network_filter = QtWidgets.QComboBox()
         self.network_filter.addItem("Все сети")
-        for network in Network:
+        for network in SUPPORTED_NETWORKS:
             self.network_filter.addItem(network.name.title())
         filter_bar.addWidget(QtWidgets.QLabel("Сеть:"))
         filter_bar.addWidget(self.network_filter)
@@ -633,42 +774,94 @@ class AnalysesPage(QtWidgets.QWidget):
         layout.addLayout(filter_bar)
 
         self.table = QtWidgets.QTableWidget(0, 5)
-        self.table.setHorizontalHeaderLabels([
-            "Адрес",
-            "Сеть",
-            "Риск",
-            "Статус",
-            "Последнее обновление",
-        ])
+        self.table.setHorizontalHeaderLabels(
+            [
+                "Адрес",
+                "Сеть",
+                "Риск",
+                "Статус",
+                "Последнее обновление",
+            ]
+        )
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
         self.table.doubleClicked.connect(self._open_selected)
         layout.addWidget(self.table)
 
-        self._results: list[AddressAnalysisResult] = []
+        self.status_filter.currentTextChanged.connect(self._refresh_table)
+        self.network_filter.currentTextChanged.connect(self._refresh_table)
+
+        self._results: list[AddressAnalysisResult] = list(self._store.results())
+        self._display_results: list[AddressAnalysisResult] = []
+        self._known_networks = {
+            self.network_filter.itemText(i)
+            for i in range(self.network_filter.count())
+        }
+        for result in self._results:
+            self._ensure_network_option(result.network)
+
+        self._refresh_table()
+        self._store.result_added.connect(self._on_result_added)
 
     def add_result(self, result: AddressAnalysisResult) -> None:
+        self._store.add_result(result)
+
+    def _on_result_added(self, result: AddressAnalysisResult) -> None:
         self._results.append(result)
-        row = self.table.rowCount()
-        self.table.insertRow(row)
+        self._ensure_network_option(result.network)
+        self._refresh_table()
 
-        risk_display, _ = _risk_to_display(result.risk_level)
-        risk_percent = f"{int(round(result.risk_score * 100))}%"
-        status = "Требует внимания" if result.risk_level in {"high", "critical"} else "Завершен"
-        timestamp = QtCore.QDateTime.currentDateTime().toString("dd.MM.yyyy HH:mm")
+    def _ensure_network_option(self, network: Network) -> None:
+        name = network.name.title()
+        if name not in self._known_networks:
+            self.network_filter.addItem(name)
+            self._known_networks.add(name)
 
-        self.table.setItem(row, 0, QtWidgets.QTableWidgetItem(result.address))
-        self.table.setItem(row, 1, QtWidgets.QTableWidgetItem(result.network.name.title()))
-        self.table.setItem(row, 2, QtWidgets.QTableWidgetItem(f"{risk_percent} / {risk_display}"))
-        self.table.setItem(row, 3, QtWidgets.QTableWidgetItem(status))
-        self.table.setItem(row, 4, QtWidgets.QTableWidgetItem(timestamp))
+    def _refresh_table(self) -> None:
+        self._display_results = [
+            result
+            for result in self._results
+            if self._matches_filters(result)
+        ]
+        self.table.setRowCount(len(self._display_results))
+        for row, result in enumerate(self._display_results):
+            risk_display, _ = _risk_to_display(result.risk_level)
+            risk_percent = f"{int(round(result.risk_score * 100))}%"
+            status = (
+                "Требует внимания"
+                if result.risk_level in {"high", "critical"}
+                else "Завершен"
+            )
+            last_seen = max((hop.timestamp for hop in result.hops), default=int(_dt.datetime.utcnow().timestamp()))
+            timestamp = QtCore.QDateTime.fromSecsSinceEpoch(last_seen).toString("dd.MM.yyyy HH:mm")
+            values = [
+                result.address,
+                result.network.name.title(),
+                f"{risk_display} ({risk_percent})",
+                status,
+                timestamp,
+            ]
+            for column, value in enumerate(values):
+                self.table.setItem(row, column, QtWidgets.QTableWidgetItem(value))
+
+    def _matches_filters(self, result: AddressAnalysisResult) -> bool:
+        status_filter = self.status_filter.currentText()
+        if status_filter == "Завершен" and result.risk_level in {"high", "critical"}:
+            return False
+        if status_filter == "Требует внимания" and result.risk_level not in {"high", "critical"}:
+            return False
+        network_filter = self.network_filter.currentText()
+        if network_filter != "Все сети" and result.network.name.title() != network_filter:
+            return False
+        return True
 
     def _open_selected(self) -> None:
-        current = self.table.currentItem()
-        if current:
-            row = current.row()
-            if 0 <= row < len(self._results):
-                self.open_details.emit(self._results[row])
+        rows = self.table.selectionModel().selectedRows()
+        if not rows:
+            return
+        index = rows[0].row()
+        if 0 <= index < len(self._display_results):
+            self.open_details.emit(self._display_results[index])
 
 
 @dataclass(frozen=True)
@@ -1440,10 +1633,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.top_bar.request_search.connect(self._handle_search)
         content_layout.addWidget(self.top_bar)
 
+        self.store = AnalysisStore()
+
         self.pages = QtWidgets.QStackedWidget()
-        self.dashboard_page = DashboardPage()
+        self.dashboard_page = DashboardPage(self.store)
         self.new_analysis_page = NewAnalysisPage()
-        self.analyses_page = AnalysesPage()
+        self.analyses_page = AnalysesPage(self.store)
         self.detail_page = AnalysisDetailPage()
         self.integrations_page = IntegrationsPage()
         self.reports_page = ReportsPage()
@@ -1519,7 +1714,7 @@ class MainWindow(QtWidgets.QMainWindow):
         QtWidgets.QMessageBox.information(self, "Поиск", f"Результаты поиска по запросу: {query}")
 
     def _analysis_completed(self, analysis: AddressAnalysisResult) -> None:
-        self.analyses_page.add_result(analysis)
+        self.store.add_result(analysis)
         risk_display, _ = _risk_to_display(analysis.risk_level)
         QtWidgets.QMessageBox.information(
             self,
