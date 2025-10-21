@@ -604,7 +604,7 @@ class NewAnalysisPage(QtWidgets.QWidget):
 
         self.network_combo = QtWidgets.QComboBox()
         for network in SUPPORTED_NETWORKS:
-            self.network_combo.addItem(network.name.title(), network.value)
+            self.network_combo.addItem(network.name.title(), network)
         if self.network_combo.count() == 0:
             self.network_combo.addItem("Нет доступных сетей", None)
             self.network_combo.setEnabled(False)
