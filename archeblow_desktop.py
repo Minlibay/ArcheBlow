@@ -20,6 +20,7 @@ import datetime as _dt
 import math
 from typing import Iterable, Mapping, Sequence
 
+import httpx
 from PySide6 import QtCore, QtGui, QtWidgets
 from qasync import QEventLoop, asyncSlot
 
@@ -1629,6 +1630,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.top_bar = TopBar(self.store)
         self.top_bar.request_search.connect(self._handle_search)
         content_layout.addWidget(self.top_bar)
+
+        self.store = AnalysisStore()
 
         self.pages = QtWidgets.QStackedWidget()
         self.dashboard_page = DashboardPage(self.store)
