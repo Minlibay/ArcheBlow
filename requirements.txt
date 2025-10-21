@@ -1,0 +1,46 @@
+# Core language and runtime support
+python-dateutil>=2.8.2
+pytz>=2024.1
+
+# Data ingestion and HTTP communication
+httpx[socks]>=0.27.0
+websockets>=12.0
+pydantic>=2.7.0
+
+# Data processing and analytics
+numpy>=1.26.0
+pandas>=2.2.0
+scikit-learn>=1.4.0
+scipy>=1.11.0
+networkx>=3.2.0
+matplotlib>=3.8.0
+
+# Machine learning and graph analysis helpers
+lightgbm>=4.3.0
+scikit-image>=0.22.0
+
+# Persistence layers
+sqlalchemy>=2.0.28
+psycopg[binary,pool]>=3.1.18
+redis>=5.0.1
+neo4j>=5.14.1
+
+# API and service layer
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+celery[redis]>=5.3.6
+
+# Desktop application stack (cross-platform)
+PySide6>=6.6.0
+qasync>=0.27.0
+
+# Observability and utilities
+loguru>=0.7.2
+tenacity>=8.2.3
+python-dotenv>=1.0.1
+
+# Testing and development
+pytest>=8.1.0
+pytest-asyncio>=0.23.6
+ruff>=0.3.5
+mypy>=1.8.0
