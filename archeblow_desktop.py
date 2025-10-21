@@ -224,10 +224,11 @@ class SearchField(QtWidgets.QWidget):
 
 
 class StatusIndicator(QtWidgets.QFrame):
-    """Displays the current sync status and background task metrics."""
+    """Displays live statistics derived from completed analyses."""
 
-    def __init__(self) -> None:
+    def __init__(self, store: AnalysisStore | None = None) -> None:
         super().__init__()
+        self._store = store
         self.setStyleSheet("color: #8b949e;")
         layout = QtWidgets.QHBoxLayout(self)
         layout.setContentsMargins(12, 0, 12, 0)
@@ -235,22 +236,54 @@ class StatusIndicator(QtWidgets.QFrame):
 
         sync_icon = QtWidgets.QLabel("🔄")
         layout.addWidget(sync_icon)
-        self.sync_label = QtWidgets.QLabel("Синхронизация: активна")
+        self.sync_label = QtWidgets.QLabel()
         layout.addWidget(self.sync_label)
 
         tasks_icon = QtWidgets.QLabel("📊")
         layout.addWidget(tasks_icon)
-        self.task_label = QtWidgets.QLabel("Фоновые задачи: 2 в работе")
+        self.task_label = QtWidgets.QLabel()
         layout.addWidget(self.task_label)
 
         layout.addStretch(1)
 
+        self._refresh_metrics()
+        if self._store is not None:
+            self._store.result_added.connect(self._on_result_added)
+
+    def _refresh_metrics(self) -> None:
+        if self._store is None:
+            self.sync_label.setText("Анализы еще не запускались")
+            self.task_label.setText("Нет данных о рисках")
+            return
+        metrics = self._store.metrics()
+        distribution = self._store.risk_distribution()
+        total = metrics.get("total", 0)
+        critical = distribution.get("critical", 0)
+        high = distribution.get("high", 0)
+        moderate = distribution.get("moderate", 0)
+        low = distribution.get("low", 0)
+        self.sync_label.setText(f"Анализов выполнено: {total}")
+        self.task_label.setText(
+            " | ".join(
+                [
+                    f"Критический риск: {critical}",
+                    f"Высокий риск: {high}",
+                    f"Средний риск: {moderate}",
+                    f"Низкий риск: {low}",
+                ]
+            )
+        )
+
+    def _on_result_added(self, _result: AddressAnalysisResult) -> None:
+        self._refresh_metrics()
+
 
 class NotificationCenter(QtWidgets.QFrame):
-    """Notification icon with dropdown placeholder."""
+    """Notification icon that surfaces recent risk notes from the store."""
 
-    def __init__(self) -> None:
+    def __init__(self, store: AnalysisStore | None = None) -> None:
         super().__init__()
+        self._store = store
         layout = QtWidgets.QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
@@ -269,11 +302,46 @@ class NotificationCenter(QtWidgets.QFrame):
             QPushButton:hover { background: rgba(56, 139, 253, 0.2); }
             """
         )
+        self.button.clicked.connect(self._show_notifications)
         layout.addWidget(self.button)
 
-        self.counter = QtWidgets.QLabel("3")
-        self.counter.setStyleSheet("color: #ffffff; background: #d29922; padding: 2px 6px; border-radius: 8px;")
+        self.counter = QtWidgets.QLabel()
+        self.counter.setStyleSheet(
+            "color: #ffffff; background: #d29922; padding: 2px 6px; border-radius: 8px;"
+        )
         layout.addWidget(self.counter)
+
+        self._update_counter()
+        if self._store is not None:
+            self._store.result_added.connect(self._handle_result_added)
+
+    def _recent_notes(self) -> Sequence[str]:
+        if self._store is None:
+            return []
+        return self._store.recent_notes(limit=5)
+
+    def _update_counter(self) -> None:
+        notes = self._recent_notes()
+        if not notes:
+            self.counter.hide()
+            return
+        self.counter.setText(str(len(notes)))
+        self.counter.show()
+
+    def _handle_result_added(self, _result: AddressAnalysisResult) -> None:
+        self._update_counter()
+
+    def _show_notifications(self) -> None:
+        menu = QtWidgets.QMenu(self)
+        notes = self._recent_notes()
+        if not notes:
+            action = menu.addAction("Новых уведомлений нет")
+            action.setEnabled(False)
+        else:
+            for note in notes:
+                action = menu.addAction(note)
+                action.setEnabled(False)
+        menu.exec(self.button.mapToGlobal(QtCore.QPoint(0, self.button.height())))
 
 
 class TopBar(QtWidgets.QFrame):
@@ -281,7 +349,7 @@ class TopBar(QtWidgets.QFrame):
 
     request_search = QtCore.Signal(str)
 
-    def __init__(self) -> None:
+    def __init__(self, store: AnalysisStore | None = None) -> None:
         super().__init__()
         self.setStyleSheet("background: #0d1117; border-bottom: 1px solid #30363d;")
         layout = QtWidgets.QHBoxLayout(self)
@@ -292,10 +360,10 @@ class TopBar(QtWidgets.QFrame):
         self.search.request_search.connect(self.request_search)
         layout.addWidget(self.search, 3)
 
-        self.status = StatusIndicator()
+        self.status = StatusIndicator(store)
         layout.addWidget(self.status, 2)
 
-        self.notifications = NotificationCenter()
+        self.notifications = NotificationCenter(store)
         layout.addWidget(self.notifications, 1)
 
 
@@ -1557,7 +1625,9 @@ class MainWindow(QtWidgets.QMainWindow):
         content_layout.setContentsMargins(0, 0, 0, 0)
         content_layout.setSpacing(0)
 
-        self.top_bar = TopBar()
+        self.store = AnalysisStore()
+
+        self.top_bar = TopBar(self.store)
         self.top_bar.request_search.connect(self._handle_search)
         content_layout.addWidget(self.top_bar)
 

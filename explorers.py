@@ -196,11 +196,11 @@ class BlockCypherExplorerClient(_BaseExplorerClient):
 
 
 class EtherscanExplorerClient(_BaseExplorerClient):
-    """Explorer integration with the Etherscan API for Ethereum."""
+    """Explorer integration with the Etherscan API for Ethereum-family networks."""
 
-    _BASE_ENDPOINTS: Mapping[Network, str] = {
-        Network.ETHEREUM: "https://api.etherscan.io/api",
-        Network.POLYGON: "https://api.polygonscan.com/api",
+    _ENDPOINTS: Mapping[Network, tuple[str, int | None]] = {
+        Network.ETHEREUM: ("https://api.etherscan.io/v2/api", 1),
+        Network.POLYGON: ("https://api.polygonscan.com/v2/api", 137),
     }
 
     def __init__(
@@ -215,11 +215,11 @@ class EtherscanExplorerClient(_BaseExplorerClient):
                 "Для работы с Etherscan необходимо указать API ключ (ETHERSCAN_API_KEY)."
             )
         super().__init__(network, session=session)
-        if network not in self._BASE_ENDPOINTS:
+        if network not in self._ENDPOINTS:
             raise UnsupportedNetworkError(
                 f"Сеть {network.value} не поддерживается Etherscan/Polygonscan API."
             )
-        self._base_url = self._BASE_ENDPOINTS[network]
+        self._base_url, self._chain_id = self._ENDPOINTS[network]
         self._api_key = api_key
 
     async def fetch_transaction_hops(self, address: str) -> Sequence[TransactionHop]:
@@ -232,11 +232,13 @@ class EtherscanExplorerClient(_BaseExplorerClient):
             "sort": "desc",
             "apikey": self._api_key,
         }
+        if self._chain_id is not None:
+            params["chainid"] = self._chain_id
         payload = await self._request_json(self._base_url, params=params)
         status = str(payload.get("status") or "0")
+        message = str(payload.get("message") or "")
         result = payload.get("result", [])
         if status != "1":
-            message = str(payload.get("message") or "")
             if isinstance(result, Mapping):
                 result_detail = result.get("message") or result.get("result")
             else:
@@ -251,10 +253,14 @@ class EtherscanExplorerClient(_BaseExplorerClient):
                     f"Etherscan API вернул сообщение об ошибке: {error_text}"
                 )
             return []
-        if not isinstance(result, Iterable):
+        if isinstance(result, Mapping):
+            transactions = result.get("transactions") or result.get("result") or []
+        else:
+            transactions = result
+        if not isinstance(transactions, Iterable):
             return []
         hops: list[TransactionHop] = []
-        for item in result:
+        for item in transactions:
             if not isinstance(item, Mapping):
                 continue
             tx_hash = str(item.get("hash") or "")
