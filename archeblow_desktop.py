@@ -232,6 +232,85 @@ class SearchField(QtWidgets.QWidget):
         self.request_search.emit(self.input.text())
 
 
+class StatsChip(QtWidgets.QFrame):
+    """Compact widget that displays a headline value with context."""
+
+    def __init__(self, title: str, icon: str | None = None) -> None:
+        super().__init__()
+        self._title = title
+        self._icon = icon or ""
+        self._alert = False
+        self._base_style = (
+            "QFrame {"
+            " background: #161b22;"
+            " border: 1px solid #30363d;"
+            " border-radius: 12px;"
+            " }"
+        )
+        self._alert_style = (
+            "QFrame {"
+            " background: rgba(248, 81, 73, 0.18);"
+            " border: 1px solid #f85149;"
+            " border-radius: 12px;"
+            " }"
+        )
+        self.setStyleSheet(self._base_style)
+
+        layout = QtWidgets.QHBoxLayout(self)
+        layout.setContentsMargins(12, 8, 12, 8)
+        layout.setSpacing(8)
+
+        self.icon_label = QtWidgets.QLabel(self._icon)
+        self.icon_label.setVisible(bool(self._icon))
+        layout.addWidget(self.icon_label)
+
+        text_layout = QtWidgets.QVBoxLayout()
+        text_layout.setContentsMargins(0, 0, 0, 0)
+        text_layout.setSpacing(2)
+
+        self.caption_label = QtWidgets.QLabel(title)
+        self.caption_label.setStyleSheet(
+            "color: #8b949e; font-size: 11px; letter-spacing: 0.5px;"
+        )
+        text_layout.addWidget(self.caption_label)
+
+        self.value_label = QtWidgets.QLabel("0")
+        self.value_label.setStyleSheet(
+            "color: #f0f6fc; font-size: 18px; font-weight: 600;"
+        )
+        text_layout.addWidget(self.value_label)
+
+        self.subtitle_label = QtWidgets.QLabel()
+        self.subtitle_label.setStyleSheet("color: #8b949e; font-size: 10px;")
+        self.subtitle_label.setWordWrap(True)
+        self.subtitle_label.hide()
+        text_layout.addWidget(self.subtitle_label)
+
+        layout.addLayout(text_layout)
+        layout.addStretch(1)
+
+        self.setSizePolicy(
+            QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Fixed
+        )
+
+    def set_value(self, value: str, subtitle: str | None = None) -> None:
+        self.value_label.setText(value)
+        if subtitle:
+            self.subtitle_label.setText(subtitle)
+            self.subtitle_label.show()
+        else:
+            self.subtitle_label.hide()
+
+    def set_tooltip(self, text: str | None) -> None:
+        self.setToolTip(text or "")
+
+    def set_alert(self, active: bool) -> None:
+        if self._alert == active:
+            return
+        self._alert = active
+        self.setStyleSheet(self._alert_style if active else self._base_style)
+
+
 class StatusIndicator(QtWidgets.QFrame):
     """Displays live statistics derived from completed analyses."""
 
@@ -243,20 +322,25 @@ class StatusIndicator(QtWidgets.QFrame):
         super().__init__()
         self._store = store
         self._monitoring = monitoring
-        self.setStyleSheet("color: #8b949e;")
+
         layout = QtWidgets.QHBoxLayout(self)
         layout.setContentsMargins(12, 0, 12, 0)
-        layout.setSpacing(16)
+        layout.setSpacing(12)
 
-        sync_icon = QtWidgets.QLabel("🔄")
-        layout.addWidget(sync_icon)
-        self.sync_label = QtWidgets.QLabel()
-        layout.addWidget(self.sync_label)
+        self.total_chip = StatsChip("Анализы", "📊")
+        layout.addWidget(self.total_chip)
 
-        tasks_icon = QtWidgets.QLabel("📊")
-        layout.addWidget(tasks_icon)
-        self.task_label = QtWidgets.QLabel()
-        layout.addWidget(self.task_label)
+        self.risk_chip = StatsChip("Высокие риски", "🛑")
+        layout.addWidget(self.risk_chip)
+
+        self.monitoring_chip = StatsChip("Мониторинг", "🛰️")
+        layout.addWidget(self.monitoring_chip)
+
+        self.api_chip = StatsChip("Статус API", "🌐")
+        layout.addWidget(self.api_chip)
+
+        self.services_chip = StatsChip("Подключено API", "🔑")
+        layout.addWidget(self.services_chip)
 
         monitoring_icon = QtWidgets.QLabel("🛰️")
         layout.addWidget(monitoring_icon)
@@ -267,6 +351,7 @@ class StatusIndicator(QtWidgets.QFrame):
 
         self._refresh_metrics()
         self._refresh_monitoring()
+        self._refresh_services()
         if self._store is not None:
             self._store.result_added.connect(self._on_result_added)
         if self._monitoring is not None:
@@ -275,9 +360,11 @@ class StatusIndicator(QtWidgets.QFrame):
 
     def _refresh_metrics(self) -> None:
         if self._store is None:
-            self.sync_label.setText("Анализы еще не запускались")
-            self.task_label.setText("Нет данных о рисках")
+            self.total_chip.set_value("—", "Хранилище не подключено")
+            self.risk_chip.set_value("—", "Нет данных")
+            self.risk_chip.set_alert(False)
             return
+
         metrics = self._store.metrics()
         distribution = self._store.risk_distribution()
         total = metrics.get("total", 0)
@@ -285,35 +372,98 @@ class StatusIndicator(QtWidgets.QFrame):
         high = distribution.get("high", 0)
         moderate = distribution.get("moderate", 0)
         low = distribution.get("low", 0)
-        self.sync_label.setText(f"Анализов выполнено: {total}")
-        self.task_label.setText(
-            " | ".join(
-                [
-                    f"Критический риск: {critical}",
-                    f"Высокий риск: {high}",
-                    f"Средний риск: {moderate}",
-                    f"Низкий риск: {low}",
-                ]
-            )
-        )
+
+        self.total_chip.set_value(str(total), "Завершено анализов")
+
+        high_total = high + critical
+        subtitle_parts = [f"Критический: {critical}", f"Высокий: {high}"]
+        tooltip_parts = subtitle_parts + [
+            f"Средний: {moderate}",
+            f"Низкий: {low}",
+        ]
+        self.risk_chip.set_value(str(high_total), " | ".join(subtitle_parts))
+        self.risk_chip.set_tooltip("\n".join(tooltip_parts))
+        self.risk_chip.set_alert(high_total > 0)
 
     def _refresh_monitoring(self) -> None:
         if self._monitoring is None:
-            self.monitoring_label.setText("Мониторинг не активирован")
+            self.monitoring_chip.set_value("0", "Мониторинг отключен")
+            self.monitoring_chip.set_alert(False)
+            self.monitoring_chip.set_tooltip(None)
+            self.api_chip.set_value("0", "Нет данных о статусе API")
+            self.api_chip.set_alert(False)
+            self.api_chip.set_tooltip(None)
             return
-        watches = len(self._monitoring.active_watches())
-        incidents = self._monitoring.active_api_incidents()
+
+        watches = list(self._monitoring.active_watches())
+        watch_count = len(watches)
+        soon_threshold = _current_utc_timestamp() + 3 * 86_400
+        expiring_soon = sum(1 for watch in watches if watch.expires_at <= soon_threshold)
+        subtitle = "Под наблюдением"
+        if expiring_soon:
+            subtitle = f"Под наблюдением • истекает: {expiring_soon}"
+        self.monitoring_chip.set_value(str(watch_count), subtitle)
+        if watches:
+            tooltip_lines = []
+            for watch in watches[:6]:
+                expiry = (
+                    QtCore.QDateTime.fromSecsSinceEpoch(
+                        watch.expires_at, QtCore.QTimeZone.utc()
+                    )
+                    .toLocalTime()
+                    .toString("dd.MM HH:mm")
+                )
+                tooltip_lines.append(
+                    f"{_short_address(watch.address)} ({watch.network.name.upper()}): до {expiry}"
+                )
+            if len(watches) > 6:
+                tooltip_lines.append(f"… и еще {len(watches) - 6} адрес(ов)")
+            self.monitoring_chip.set_tooltip("\n".join(tooltip_lines))
+        else:
+            self.monitoring_chip.set_tooltip("Адреса в мониторинге отсутствуют")
+        self.monitoring_chip.set_alert(False)
+
+        incidents = list(self._monitoring.active_api_incidents())
+        incident_count = len(incidents)
+        subtitle = "API стабильны" if not incidents else "Активные сбои"
+        self.api_chip.set_value(str(incident_count), subtitle)
         if incidents:
-            incident_parts = [
-                f"{item.get('service_name', item.get('service_id'))}: {item.get('failures', 0)}"
+            tooltip_lines = [
+                f"{item.get('service_name', item.get('service_id'))}: {item.get('failures', 0)} сбоев"
                 for item in incidents
             ]
-            incident_text = ", ".join(incident_parts)
+            self.api_chip.set_tooltip("\n".join(tooltip_lines))
         else:
-            incident_text = "API стабильны"
-        self.monitoring_label.setText(
-            f"Мониторинг: {watches} адрес(ов); {incident_text}"
+            self.api_chip.set_tooltip("Ошибок API не обнаружено")
+        self.api_chip.set_alert(bool(incidents))
+
+    def _refresh_services(self) -> None:
+        configured: list[str] = []
+        missing: list[str] = []
+        for entry in API_SERVICE_KEYS.values():
+            if entry.resolve():
+                configured.append(entry.display_name)
+            else:
+                missing.append(entry.display_name)
+
+        total = len(API_SERVICE_KEYS)
+        self.services_chip.set_value(
+            str(len(configured)), f"из {total} сервисов"
         )
+        if configured or missing:
+            tooltip_lines: list[str] = []
+            if configured:
+                tooltip_lines.append(
+                    "Активно: " + ", ".join(sorted(configured))
+                )
+            if missing:
+                tooltip_lines.append(
+                    "Нет ключей: " + ", ".join(sorted(missing))
+                )
+            self.services_chip.set_tooltip("\n".join(tooltip_lines))
+        else:
+            self.services_chip.set_tooltip(None)
+        self.services_chip.set_alert(len(configured) == 0)
 
     def _on_result_added(self, _result: AddressAnalysisResult) -> None:
         self._refresh_metrics()
