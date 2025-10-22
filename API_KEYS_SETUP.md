@@ -19,6 +19,12 @@ CHAINZ_API_KEY=...
 COINGECKO_API_KEY=...
 OFAC_API_KEY=N/A
 HEURISTIC_MIXER_TOKEN=N/A
+ARCHEBLOW_AI_ANALYST=N/A
+ARCHEBLOW_MONITORING_WEBHOOK=https://hooks.example/api
 ```
 
 После изменения файла перезапустите приложение, чтобы новые значения подхватились.
+
+## Webhook мониторинга
+
+Переменная `ARCHEBLOW_MONITORING_WEBHOOK` позволяет указать URL, на который будут отправляться уведомления об ошибках публичных API. Формат полезной нагрузки — JSON c полями `timestamp`, `level`, `source`, `message` и `details`. Если переменная не задана, события остаются внутри приложения и доступны в дашборде и деталях анализа.

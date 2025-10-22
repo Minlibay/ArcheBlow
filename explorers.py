@@ -23,8 +23,17 @@ class UnsupportedNetworkError(ExplorerAPIError):
 class _BaseExplorerClient:
     """Common helper base for explorer clients."""
 
-    def __init__(self, network: Network, session: httpx.AsyncClient | None = None) -> None:
+    def __init__(
+        self,
+        network: Network,
+        *,
+        session: httpx.AsyncClient | None = None,
+        service_id: str,
+        display_name: str,
+    ) -> None:
         self.network = network
+        self.service_id = service_id
+        self.service_name = display_name
         self._session = session
 
     async def _request_json(
@@ -72,7 +81,12 @@ class BlockchainComExplorerClient(_BaseExplorerClient):
         session: httpx.AsyncClient | None = None,
         api_code: str | None = None,
     ) -> None:
-        super().__init__(network, session=session)
+        super().__init__(
+            network,
+            session=session,
+            service_id="blockchain_com",
+            display_name="Blockchain.com Explorer",
+        )
         self._api_code = api_code
 
     async def fetch_transaction_hops(self, address: str) -> Sequence[TransactionHop]:
@@ -143,7 +157,12 @@ class BlockCypherExplorerClient(_BaseExplorerClient):
         session: httpx.AsyncClient | None = None,
         token: str | None = None,
     ) -> None:
-        super().__init__(network, session=session)
+        super().__init__(
+            network,
+            session=session,
+            service_id="blockcypher",
+            display_name="BlockCypher API",
+        )
         if network not in self._BASE_ENDPOINTS:
             raise UnsupportedNetworkError(
                 f"Сеть {network.value} не поддерживается публичным API BlockCypher."
@@ -209,16 +228,24 @@ class EtherscanExplorerClient(_BaseExplorerClient):
         *,
         session: httpx.AsyncClient | None = None,
         api_key: str | None,
+        service_id: str = "etherscan",
     ) -> None:
         if not api_key:
+            env_name = "POLYGONSCAN_API_KEY" if service_id == "polygonscan" else "ETHERSCAN_API_KEY"
             raise ExplorerAPIError(
-                "Для работы с Etherscan необходимо указать API ключ (ETHERSCAN_API_KEY)."
+                f"Для работы с {service_id} необходимо указать API ключ ({env_name})."
             )
-        super().__init__(network, session=session)
         if network not in self._ENDPOINTS:
             raise UnsupportedNetworkError(
                 f"Сеть {network.value} не поддерживается Etherscan/Polygonscan API."
             )
+        display_name = "Polygonscan API" if service_id == "polygonscan" else "Etherscan API"
+        super().__init__(
+            network,
+            session=session,
+            service_id=service_id,
+            display_name=display_name,
+        )
         self._base_url, self._chain_id = self._ENDPOINTS[network]
         self._api_key = api_key
 
@@ -305,7 +332,12 @@ class TronGridExplorerClient(_BaseExplorerClient):
             raise ExplorerAPIError(
                 "Для работы с TronGrid необходимо указать API ключ (TRONGRID_API_KEY)."
             )
-        super().__init__(network, session=session)
+        super().__init__(
+            network,
+            session=session,
+            service_id="trongrid",
+            display_name="TronGrid API",
+        )
         if network not in self._BASE_URLS:
             raise UnsupportedNetworkError(f"Сеть {network.value} не поддерживается TronGrid API.")
         self._base_url = self._BASE_URLS[network]
@@ -406,7 +438,13 @@ def create_explorer_clients(network: Network) -> Sequence[_BaseExplorerClient]:
         return [BlockCypherExplorerClient(Network.LITECOIN, token=blockcypher_token)]
     if network == Network.POLYGON:
         polygonscan_key = get_api_key("polygonscan")
-        return [EtherscanExplorerClient(Network.POLYGON, api_key=polygonscan_key)]
+        return [
+            EtherscanExplorerClient(
+                Network.POLYGON,
+                api_key=polygonscan_key,
+                service_id="polygonscan",
+            )
+        ]
     raise UnsupportedNetworkError(
         "Выбранная сеть не поддерживается текущими публичными интеграциями."
     )

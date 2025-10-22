@@ -125,6 +125,12 @@ API_SERVICE_KEYS: Mapping[str, APIServiceKey] = {
         env_var="ARCHEBLOW_AI_ANALYST",
         default_value="N/A",
     ),
+    "monitoring_webhook": APIServiceKey(
+        service_id="monitoring_webhook",
+        display_name="ArcheBlow Monitoring Webhook",
+        env_var="ARCHEBLOW_MONITORING_WEBHOOK",
+        default_value=None,
+    ),
 }
 
 

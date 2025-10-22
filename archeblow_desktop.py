@@ -31,7 +31,7 @@ from archeblow_service import (
     Network,
 )
 from analysis_store import AnalysisStore
-from api_keys import API_SERVICE_KEYS, get_masked_key
+from api_keys import API_SERVICE_KEYS, get_api_key, get_masked_key
 from ai_analyst import AnalystBriefing, ArtificialAnalyst, analyst_playbook
 from explorers import (
     ExplorerAPIError,
@@ -39,6 +39,7 @@ from explorers import (
     UnsupportedNetworkError,
     create_explorer_clients,
 )
+from monitoring import MonitoringService
 def _current_utc_timestamp() -> int:
     return int(_dt.datetime.now(_dt.timezone.utc).timestamp())
 
@@ -59,6 +60,13 @@ def _short_address(value: str) -> str:
     if len(value) <= 15:
         return value
     return f"{value[:6]}…{value[-4:]}"
+
+
+def _service_display_name(service_id: str) -> str:
+    entry = API_SERVICE_KEYS.get(service_id)
+    if entry:
+        return entry.display_name
+    return service_id
 
 
 _DEFAULT_MIXER_WATCHLIST: Mapping[str, str] = {
@@ -227,9 +235,14 @@ class SearchField(QtWidgets.QWidget):
 class StatusIndicator(QtWidgets.QFrame):
     """Displays live statistics derived from completed analyses."""
 
-    def __init__(self, store: AnalysisStore | None = None) -> None:
+    def __init__(
+        self,
+        store: AnalysisStore | None = None,
+        monitoring: MonitoringService | None = None,
+    ) -> None:
         super().__init__()
         self._store = store
+        self._monitoring = monitoring
         self.setStyleSheet("color: #8b949e;")
         layout = QtWidgets.QHBoxLayout(self)
         layout.setContentsMargins(12, 0, 12, 0)
@@ -245,11 +258,20 @@ class StatusIndicator(QtWidgets.QFrame):
         self.task_label = QtWidgets.QLabel()
         layout.addWidget(self.task_label)
 
+        monitoring_icon = QtWidgets.QLabel("🛰️")
+        layout.addWidget(monitoring_icon)
+        self.monitoring_label = QtWidgets.QLabel()
+        layout.addWidget(self.monitoring_label)
+
         layout.addStretch(1)
 
         self._refresh_metrics()
+        self._refresh_monitoring()
         if self._store is not None:
             self._store.result_added.connect(self._on_result_added)
+        if self._monitoring is not None:
+            self._monitoring.event_recorded.connect(self._on_monitoring_event)
+            self._monitoring.watch_added.connect(self._on_monitoring_event)
 
     def _refresh_metrics(self) -> None:
         if self._store is None:
@@ -275,16 +297,42 @@ class StatusIndicator(QtWidgets.QFrame):
             )
         )
 
+    def _refresh_monitoring(self) -> None:
+        if self._monitoring is None:
+            self.monitoring_label.setText("Мониторинг не активирован")
+            return
+        watches = len(self._monitoring.active_watches())
+        incidents = self._monitoring.active_api_incidents()
+        if incidents:
+            incident_parts = [
+                f"{item.get('service_name', item.get('service_id'))}: {item.get('failures', 0)}"
+                for item in incidents
+            ]
+            incident_text = ", ".join(incident_parts)
+        else:
+            incident_text = "API стабильны"
+        self.monitoring_label.setText(
+            f"Мониторинг: {watches} адрес(ов); {incident_text}"
+        )
+
     def _on_result_added(self, _result: AddressAnalysisResult) -> None:
         self._refresh_metrics()
 
+    def _on_monitoring_event(self, _event: object) -> None:
+        self._refresh_monitoring()
+
 
 class NotificationCenter(QtWidgets.QFrame):
-    """Notification icon that surfaces recent risk notes from the store."""
+    """Notification icon that surfaces recent risk notes and monitoring alerts."""
 
-    def __init__(self, store: AnalysisStore | None = None) -> None:
+    def __init__(
+        self,
+        store: AnalysisStore | None = None,
+        monitoring: MonitoringService | None = None,
+    ) -> None:
         super().__init__()
         self._store = store
+        self._monitoring = monitoring
         layout = QtWidgets.QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
@@ -315,6 +363,9 @@ class NotificationCenter(QtWidgets.QFrame):
         self._update_counter()
         if self._store is not None:
             self._store.result_added.connect(self._handle_result_added)
+        if self._monitoring is not None:
+            self._monitoring.event_recorded.connect(self._on_monitoring_event)
+            self._monitoring.watch_added.connect(self._on_monitoring_event)
 
     def _recent_notes(self) -> Sequence[str]:
         if self._store is None:
@@ -322,6 +373,13 @@ class NotificationCenter(QtWidgets.QFrame):
         notes = list(self._store.recent_notes(limit=5))
         alerts = list(self._store.analyst_alerts(limit=5))
         combined: list[str] = []
+        if self._monitoring is not None:
+            for event in self._monitoring.recent_events(limit=5):
+                if event.level not in {"error", "warning"}:
+                    continue
+                combined.append(self._format_monitoring_event(event))
+                if len(combined) >= 5:
+                    return combined
         combined.extend(alerts)
         for note in notes:
             if len(combined) >= 5:
@@ -340,6 +398,9 @@ class NotificationCenter(QtWidgets.QFrame):
     def _handle_result_added(self, _result: AddressAnalysisResult) -> None:
         self._update_counter()
 
+    def _on_monitoring_event(self, _event: object) -> None:
+        self._update_counter()
+
     def _show_notifications(self) -> None:
         menu = QtWidgets.QMenu(self)
         notes = self._recent_notes()
@@ -352,13 +413,42 @@ class NotificationCenter(QtWidgets.QFrame):
                 action.setEnabled(False)
         menu.exec(self.button.mapToGlobal(QtCore.QPoint(0, self.button.height())))
 
+    @staticmethod
+    def _format_monitoring_event(event: object) -> str:
+        if not isinstance(event, dict) and not hasattr(event, "details"):
+            return str(event)
+        if hasattr(event, "details"):
+            details = getattr(event, "details", {})
+            level = getattr(event, "level", "info")
+            timestamp = getattr(event, "timestamp", _current_utc_timestamp())
+            message = getattr(event, "message", "")
+        else:
+            details = event.get("details", {})
+            level = event.get("level", "info")
+            timestamp = event.get("timestamp", _current_utc_timestamp())
+            message = event.get("message", "")
+        service_name = details.get("service_name") or _service_display_name(
+            details.get("service_id", "")
+        )
+        ts_text = (
+            QtCore.QDateTime.fromSecsSinceEpoch(timestamp, QtCore.QTimeZone.utc())
+            .toLocalTime()
+            .toString("HH:mm")
+        )
+        level_display = level.upper()
+        return f"{ts_text} • [{level_display}] {service_name}: {message}"
+
 
 class TopBar(QtWidgets.QFrame):
     """Combines search, status indicators and notifications."""
 
     request_search = QtCore.Signal(str)
 
-    def __init__(self, store: AnalysisStore | None = None) -> None:
+    def __init__(
+        self,
+        store: AnalysisStore | None = None,
+        monitoring: MonitoringService | None = None,
+    ) -> None:
         super().__init__()
         self.setStyleSheet("background: #0d1117; border-bottom: 1px solid #30363d;")
         layout = QtWidgets.QHBoxLayout(self)
@@ -369,10 +459,10 @@ class TopBar(QtWidgets.QFrame):
         self.search.request_search.connect(self.request_search)
         layout.addWidget(self.search, 3)
 
-        self.status = StatusIndicator(store)
+        self.status = StatusIndicator(store, monitoring)
         layout.addWidget(self.status, 2)
 
-        self.notifications = NotificationCenter(store)
+        self.notifications = NotificationCenter(store, monitoring)
         layout.addWidget(self.notifications, 1)
 
 
@@ -446,9 +536,14 @@ class RiskDistributionWidget(QtWidgets.QWidget):
 class DashboardPage(QtWidgets.QWidget):
     """Dashboard showing live metrics based on completed analyses."""
 
-    def __init__(self, store: AnalysisStore) -> None:
+    def __init__(
+        self,
+        store: AnalysisStore,
+        monitoring: MonitoringService | None = None,
+    ) -> None:
         super().__init__()
         self._store = store
+        self._monitoring = monitoring
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 20)
@@ -502,6 +597,20 @@ class DashboardPage(QtWidgets.QWidget):
         notifications.setLayout(notif_layout)
         layout.addWidget(notifications)
 
+        monitoring_box = QtWidgets.QGroupBox("Система мониторинга")
+        monitoring_layout = QtWidgets.QVBoxLayout()
+        self.monitoring_watch_table = QtWidgets.QTableWidget(0, 4)
+        self.monitoring_watch_table.setHorizontalHeaderLabels(
+            ["Адрес", "Сеть", "Истекает", "Комментарий"]
+        )
+        self.monitoring_watch_table.horizontalHeader().setStretchLastSection(True)
+        monitoring_layout.addWidget(self.monitoring_watch_table)
+        self.api_status_list = QtWidgets.QListWidget()
+        self.api_status_list.setAlternatingRowColors(True)
+        monitoring_layout.addWidget(self.api_status_list)
+        monitoring_box.setLayout(monitoring_layout)
+        layout.addWidget(monitoring_box)
+
         analyst_box = QtWidgets.QGroupBox("Рекомендации искусственного аналитика")
         analyst_layout = QtWidgets.QVBoxLayout()
         self.ai_recommendations_list = QtWidgets.QListWidget()
@@ -510,6 +619,9 @@ class DashboardPage(QtWidgets.QWidget):
         layout.addWidget(analyst_box)
 
         self._store.result_added.connect(self._refresh)
+        if self._monitoring is not None:
+            self._monitoring.event_recorded.connect(self._on_monitoring_event)
+            self._monitoring.watch_added.connect(self._on_monitoring_event)
         self._refresh()
 
     def _refresh(self) -> None:
@@ -519,6 +631,7 @@ class DashboardPage(QtWidgets.QWidget):
         self.risk_distribution.update_distribution(self._store.risk_distribution())
         self._refresh_transactions()
         self._refresh_notifications()
+        self._refresh_monitoring()
         self._refresh_ai_recommendations()
 
     def _refresh_transactions(self) -> None:
@@ -543,6 +656,13 @@ class DashboardPage(QtWidgets.QWidget):
         notes = list(self._store.recent_notes(limit=5))
         alerts = list(self._store.analyst_alerts(limit=5))
         combined: list[str] = []
+        if self._monitoring is not None:
+            for event in self._monitoring.recent_events(limit=5):
+                if event.level not in {"error", "warning"}:
+                    continue
+                combined.append(NotificationCenter._format_monitoring_event(event))
+                if len(combined) >= 5:
+                    break
         combined.extend(alerts)
         for note in notes:
             if len(combined) >= 5:
@@ -554,6 +674,73 @@ class DashboardPage(QtWidgets.QWidget):
             self.notifications_list.addItem("Пока нет комментариев по рискам.")
             return
         self.notifications_list.addItems(combined)
+
+    def _refresh_monitoring(self) -> None:
+        if self._monitoring is None:
+            self.monitoring_watch_table.setRowCount(0)
+            self.api_status_list.clear()
+            self.api_status_list.addItem("Мониторинг не активирован.")
+            return
+
+        watches = self._monitoring.active_watches()
+        self.monitoring_watch_table.setRowCount(len(watches))
+        for row, watch in enumerate(watches):
+            expiry = (
+                QtCore.QDateTime.fromSecsSinceEpoch(watch.expires_at, QtCore.QTimeZone.utc())
+                .toLocalTime()
+                .toString("dd.MM.yyyy HH:mm")
+            )
+            values = [
+                watch.address,
+                watch.network.name.upper(),
+                expiry,
+                watch.comment or "—",
+            ]
+            for column, value in enumerate(values):
+                self.monitoring_watch_table.setItem(
+                    row, column, QtWidgets.QTableWidgetItem(value)
+                )
+        if not watches:
+            self.monitoring_watch_table.setRowCount(0)
+
+        self.api_status_list.clear()
+        statuses = self._monitoring.api_status_snapshot()
+        if not statuses:
+            self.api_status_list.addItem("API ошибок не обнаружено.")
+            return
+
+        def _format_ts(raw: object) -> str:
+            if not raw:
+                return "—"
+            try:
+                value = int(raw)
+            except (TypeError, ValueError):
+                return "—"
+            return (
+                QtCore.QDateTime.fromSecsSinceEpoch(value, QtCore.QTimeZone.utc())
+                .toLocalTime()
+                .toString("dd.MM HH:mm")
+            )
+
+        for state in statuses:
+            service_name = state.get("service_name") or state.get("service_id")
+            status = state.get("status", "ok")
+            failures = int(state.get("failures", 0) or 0)
+            if status == "error":
+                detail = (
+                    f"ошибки: {failures}, последнее: {_format_ts(state.get('last_error'))}"
+                )
+                prefix = "⚠️"
+            else:
+                detail = f"успех: {_format_ts(state.get('last_success'))}"
+                prefix = "✅"
+            message = state.get("last_error_message") if status == "error" else state.get("last_message")
+            if message:
+                detail = f"{detail} — {message}"
+            self.api_status_list.addItem(f"{prefix} {service_name}: {detail}")
+
+    def _on_monitoring_event(self, _event: object) -> None:
+        self._refresh_monitoring()
 
     def _refresh_ai_recommendations(self) -> None:
         briefings = self._store.recent_briefings(limit=5)
@@ -600,8 +787,13 @@ class NewAnalysisPage(QtWidgets.QWidget):
 
     analysis_completed = QtCore.Signal(AddressAnalysisResult)
 
-    def __init__(self) -> None:
+    def __init__(self, monitoring: MonitoringService | None = None) -> None:
         super().__init__()
+        self._monitoring = monitoring
+        self._active_explorer_id: str | None = None
+        self._active_address: str | None = None
+        self._active_network: Network | None = None
+
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(40, 40, 40, 40)
         layout.setSpacing(20)
@@ -694,6 +886,10 @@ class NewAnalysisPage(QtWidgets.QWidget):
             self.log_output.append("Выберите поддерживаемую сеть для анализа.")
             return
 
+        self._active_address = address
+        self._active_network = network
+        self._active_explorer_id = None
+
         self.launch_button.setDisabled(True)
         self.progress.setVisible(True)
         self.progress.setRange(0, 0)
@@ -704,6 +900,7 @@ class NewAnalysisPage(QtWidgets.QWidget):
         )
         self.log_output.append("Подключение к публичным API выбранной сети…")
 
+        result: AddressAnalysisResult | None = None
         try:
             result = await self._perform_analysis(address, network)
         except UnsupportedNetworkError as exc:
@@ -728,8 +925,41 @@ class NewAnalysisPage(QtWidgets.QWidget):
             self.progress.setVisible(False)
             self.launch_button.setEnabled(True)
 
+        if result is None:
+            return
+
         self.log_output.append("Анализ завершен. Результаты доступны на вкладке 'Анализы'.")
         self.log_output.append("Формирование заключения искусственного аналитика…")
+
+        if self._monitoring is not None:
+            self._monitoring.log(
+                "info",
+                f"Анализ адреса {address} ({network.name.upper()}) завершен успешно.",
+                source="analysis_ui",
+                category="analysis",
+                details={
+                    "address": address,
+                    "network": network.value,
+                    "service_name": "Форма нового анализа",
+                },
+            )
+
+        if self.monitoring_toggle.isChecked() and self._monitoring is not None:
+            watch = self._monitoring.schedule_watch(
+                address,
+                network,
+                days=30,
+                comment="Запущено пользователем из формы нового анализа",
+            )
+            expiry_text = (
+                QtCore.QDateTime.fromSecsSinceEpoch(watch.expires_at, QtCore.QTimeZone.utc())
+                .toLocalTime()
+                .toString("dd.MM.yyyy HH:mm")
+            )
+            self.log_output.append(
+                f"Адрес добавлен в мониторинг до {expiry_text}."
+            )
+
         self.analysis_completed.emit(result)
 
     def _resolve_selected_network(self) -> Network | None:
@@ -754,26 +984,67 @@ class NewAnalysisPage(QtWidgets.QWidget):
 
     async def _perform_analysis(self, address: str, network: Network) -> AddressAnalysisResult:
         self.log_output.append("Запрос истории транзакций…")
-        explorers = create_explorer_clients(network)
+        explorers = list(create_explorer_clients(network))
+        primary_client = explorers[0] if explorers else None
+        if primary_client is not None:
+            self._active_explorer_id = getattr(primary_client, "service_id", None)
         for client in explorers:
-            friendly_name = client.__class__.__name__.replace("ExplorerClient", " API")
+            friendly_name = getattr(
+                client,
+                "service_name",
+                client.__class__.__name__.replace("ExplorerClient", " API"),
+            )
             self.log_output.append(f"Используется {friendly_name} для получения данных…")
         mixer_client = HeuristicMixerClient(watchlist=_DEFAULT_MIXER_WATCHLIST)
         analyzer = ArcheBlowAnalyzer(
             explorer_clients=list(explorers),
             mixer_clients=[mixer_client],
         )
-        result = await analyzer.analyze(address, network)
-        if not result.hops:
-            self.log_output.append("API не вернуло транзакции — возможно, адрес новый или данные ограничены.")
+        try:
+            result = await analyzer.analyze(address, network)
+        except ExplorerAPIError as exc:
+            if self._monitoring is not None and primary_client is not None:
+                self._monitoring.record_api_error(
+                    primary_client.service_id,
+                    str(exc),
+                    address=address,
+                    network=network,
+                    details={"stage": "fetch"},
+                )
+            raise
         else:
-            self.log_output.append(f"Получено транзакций: {len(result.hops)}")
-        return result
+            if self._monitoring is not None and primary_client is not None:
+                self._monitoring.record_api_success(
+                    primary_client.service_id,
+                    f"{primary_client.service_name}: данные получены",
+                    address=address,
+                    network=network,
+                    details={"transactions": len(result.hops)},
+                )
+            if not result.hops:
+                self.log_output.append(
+                    "API не вернуло транзакции — возможно, адрес новый или данные ограничены."
+                )
+            else:
+                self.log_output.append(f"Получено транзакций: {len(result.hops)}")
+            self._active_explorer_id = None
+            return result
 
     def _handle_error(self, message: str) -> None:
         self.log_output.append(message)
-        self.progress.setVisible(False)
-        self.launch_button.setEnabled(True)
+        if self._monitoring is not None and self._active_explorer_id is None:
+            details: dict[str, object] = {"service_name": "Форма нового анализа"}
+            if self._active_address:
+                details["address"] = self._active_address
+            if self._active_network is not None:
+                details["network"] = self._active_network.value
+            self._monitoring.log(
+                "error",
+                message,
+                source="analysis_ui",
+                category="analysis",
+                details=details,
+            )
 
 
 class AnalysesPage(QtWidgets.QWidget):
@@ -1262,10 +1533,12 @@ class AnalysisDetailPage(QtWidgets.QWidget):
         self,
         store: AnalysisStore | None = None,
         analyst: ArtificialAnalyst | None = None,
+        monitoring: MonitoringService | None = None,
     ) -> None:
         super().__init__()
         self._store = store
         self._analyst = analyst
+        self._monitoring = monitoring
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(16)
@@ -1287,6 +1560,9 @@ class AnalysisDetailPage(QtWidgets.QWidget):
 
         self.current_analysis: AddressAnalysisResult | None = None
         self.current_briefing: AnalystBriefing | None = None
+        if self._monitoring is not None:
+            self._monitoring.event_recorded.connect(self._on_monitoring_event)
+            self._monitoring.watch_added.connect(self._on_monitoring_event)
 
     def set_analysis(
         self,
@@ -1308,12 +1584,14 @@ class AnalysisDetailPage(QtWidgets.QWidget):
         self.risk_notes.setPlainText("\n".join(notes))
 
         self.services_list.clear()
-        services_used = [
-            API_SERVICE_KEYS["blockcypher"].display_name,
-            API_SERVICE_KEYS["heuristic_mixer"].display_name,
-        ]
-        services_used.append("Искусственный аналитик ArcheBlow")
+        services_used = list(analysis.sources) if analysis.sources else []
+        if "Искусственный аналитик ArcheBlow" not in services_used:
+            services_used.append("Искусственный аналитик ArcheBlow")
+        if not services_used:
+            services_used = ["Источники данных не определены"]
         self.services_list.addItems(services_used)
+
+        self._render_monitoring_section(analysis)
 
         self.graph_widget.load_from_analysis(analysis)
         self._populate_transactions(analysis)
@@ -1377,6 +1655,17 @@ class AnalysisDetailPage(QtWidgets.QWidget):
         ai_box.setLayout(ai_layout)
         layout.addWidget(ai_box)
 
+        monitoring_box = QtWidgets.QGroupBox("Мониторинг адреса")
+        monitoring_layout = QtWidgets.QVBoxLayout()
+        self.monitoring_status = QtWidgets.QLabel("Мониторинг не активирован.")
+        self.monitoring_status.setStyleSheet("color: #8b949e;")
+        monitoring_layout.addWidget(self.monitoring_status)
+        self.monitoring_events = QtWidgets.QListWidget()
+        self.monitoring_events.setAlternatingRowColors(True)
+        monitoring_layout.addWidget(self.monitoring_events)
+        monitoring_box.setLayout(monitoring_layout)
+        layout.addWidget(monitoring_box)
+
         return widget
 
     def _resolve_briefing(
@@ -1432,6 +1721,55 @@ class AnalysisDetailPage(QtWidgets.QWidget):
                 self.ai_alerts.addItem(alert)
         else:
             self.ai_alerts.addItem("Тревожных событий не обнаружено.")
+
+    def _render_monitoring_section(self, analysis: AddressAnalysisResult) -> None:
+        if not hasattr(self, "monitoring_status"):
+            return
+        if self._monitoring is None:
+            self.monitoring_status.setText("Система мониторинга не активирована.")
+            self.monitoring_events.clear()
+            self.monitoring_events.addItem("Мониторинг недоступен.")
+            return
+
+        watches = self._monitoring.watch_for(analysis.address, analysis.network)
+        if not watches:
+            self.monitoring_status.setText("Адрес не находится под активным мониторингом.")
+        else:
+            parts = []
+            for watch in watches:
+                expiry = (
+                    QtCore.QDateTime.fromSecsSinceEpoch(
+                        watch.expires_at, QtCore.QTimeZone.utc()
+                    )
+                    .toLocalTime()
+                    .toString("dd.MM.yyyy HH:mm")
+                )
+                parts.append(f"до {expiry}")
+            self.monitoring_status.setText(
+                "Активный мониторинг: " + ", ".join(parts)
+            )
+
+        events = self._monitoring.events_for(analysis.address, analysis.network, limit=5)
+        self.monitoring_events.clear()
+        if not events:
+            self.monitoring_events.addItem("Журнал событий пуст.")
+            return
+        for event in events:
+            ts_text = (
+                QtCore.QDateTime.fromSecsSinceEpoch(event.timestamp, QtCore.QTimeZone.utc())
+                .toLocalTime()
+                .toString("dd.MM HH:mm")
+            )
+            service_name = event.details.get("service_name") or _service_display_name(
+                event.details.get("service_id", event.source)
+            )
+            self.monitoring_events.addItem(
+                f"{ts_text}: [{event.level.upper()}] {service_name} — {event.message}"
+            )
+
+    def _on_monitoring_event(self, _event: object) -> None:
+        if self.current_analysis is not None:
+            self._render_monitoring_section(self.current_analysis)
 
     def _create_transactions_tab(self) -> QtWidgets.QWidget:
         widget = QtWidgets.QWidget()
@@ -1597,6 +1935,7 @@ class IntegrationsPage(QtWidgets.QWidget):
             ("ofac_watchlist", "Активен", "--", "Обновить"),
             ("heuristic_mixer", "Активен", "--", "Синхронизировать"),
             ("ai_analyst", "Активен", "N/A", "Открыть инструкцию"),
+            ("monitoring_webhook", "Не настроен", "--", "Добавить webhook"),
         ]
 
         table = QtWidgets.QTableWidget(len(services), 5)
@@ -1638,6 +1977,7 @@ class IntegrationsPage(QtWidgets.QWidget):
             "TRONGRID_API_KEY=...\n"
             "POLYGONSCAN_API_KEY=...\n"
             "ARCHEBLOW_AI_ANALYST=N/A"
+            "\nARCHEBLOW_MONITORING_WEBHOOK=https://hooks.example/api"
         )
         help_layout.addWidget(example)
         help_box.setLayout(help_layout)
@@ -1799,18 +2139,20 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.store = AnalysisStore()
         self.analyst = ArtificialAnalyst()
+        webhook_url = get_api_key("monitoring_webhook")
+        self.monitoring = MonitoringService(webhook_url=webhook_url)
 
-        self.top_bar = TopBar(self.store)
+        self.top_bar = TopBar(self.store, self.monitoring)
         self.top_bar.request_search.connect(self._handle_search)
         content_layout.addWidget(self.top_bar)
 
         self.store = AnalysisStore()
 
         self.pages = QtWidgets.QStackedWidget()
-        self.dashboard_page = DashboardPage(self.store)
-        self.new_analysis_page = NewAnalysisPage()
+        self.dashboard_page = DashboardPage(self.store, self.monitoring)
+        self.new_analysis_page = NewAnalysisPage(self.monitoring)
         self.analyses_page = AnalysesPage(self.store)
-        self.detail_page = AnalysisDetailPage(self.store, self.analyst)
+        self.detail_page = AnalysisDetailPage(self.store, self.analyst, self.monitoring)
         self.integrations_page = IntegrationsPage()
         self.reports_page = ReportsPage()
         self.settings_page = SettingsPage()

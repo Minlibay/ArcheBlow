@@ -64,12 +64,15 @@ class AddressAnalysisResult:
     hops: List[TransactionHop] = field(default_factory=list)
     mixers: List[MixerMatch] = field(default_factory=list)
     notes: List[str] = field(default_factory=list)
+    sources: List[str] = field(default_factory=list)
 
 
 class ExplorerClient(Protocol):
     """Protocol for blockchain explorer integrations."""
 
     network: Network
+    service_id: str
+    service_name: str
 
     async def fetch_transaction_hops(self, address: str) -> Sequence[TransactionHop]:
         """Return a chronological list of transaction hops for ``address``."""
@@ -77,6 +80,9 @@ class ExplorerClient(Protocol):
 
 class MixerIntelClient(Protocol):
     """Protocol for mixer intelligence sources."""
+
+    service_id: str
+    service_name: str
 
     async def detect_mixers(
         self, address: str, hops: Sequence[TransactionHop]
@@ -217,6 +223,14 @@ class ArcheBlowAnalyzer:
         notes: List[str] = []
         risk_score = self._risk_model.evaluate(mixers=mixers, hops=hops, notes=notes)
         risk_level = self._risk_level_from_score(risk_score)
+        sources: List[str] = []
+        explorer_name = getattr(explorer, "service_name", explorer.__class__.__name__)
+        sources.append(explorer_name)
+        for mixer_client in self._mixers:
+            sources.append(
+                getattr(mixer_client, "service_name", mixer_client.__class__.__name__)
+            )
+        unique_sources = list(dict.fromkeys(sources))
         return AddressAnalysisResult(
             address=address,
             network=network,
@@ -225,6 +239,7 @@ class ArcheBlowAnalyzer:
             hops=list(hops),
             mixers=list(mixers),
             notes=notes,
+            sources=unique_sources,
         )
 
     def _select_explorer(self, network: Network) -> ExplorerClient:
@@ -281,9 +296,13 @@ class HeuristicMixerClient:
         *,
         watchlist: Mapping[str, str],
         base_confidence: float = 0.7,
+        service_id: str = "heuristic_mixer",
+        service_name: str = "Heuristic Mixer Watchlist",
     ) -> None:
         self._watchlist = {addr.lower(): name for addr, name in watchlist.items()}
         self._base_confidence = base_confidence
+        self.service_id = service_id
+        self.service_name = service_name
 
     async def detect_mixers(
         self, address: str, hops: Sequence[TransactionHop]
