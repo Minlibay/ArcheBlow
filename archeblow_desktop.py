@@ -32,6 +32,7 @@ from archeblow_service import (
 )
 from analysis_store import AnalysisStore
 from api_keys import API_SERVICE_KEYS, get_masked_key
+from ai_analyst import AnalystBriefing, ArtificialAnalyst, analyst_playbook
 from explorers import (
     ExplorerAPIError,
     SUPPORTED_NETWORKS,
@@ -318,7 +319,15 @@ class NotificationCenter(QtWidgets.QFrame):
     def _recent_notes(self) -> Sequence[str]:
         if self._store is None:
             return []
-        return self._store.recent_notes(limit=5)
+        notes = list(self._store.recent_notes(limit=5))
+        alerts = list(self._store.analyst_alerts(limit=5))
+        combined: list[str] = []
+        combined.extend(alerts)
+        for note in notes:
+            if len(combined) >= 5:
+                break
+            combined.append(note)
+        return combined
 
     def _update_counter(self) -> None:
         notes = self._recent_notes()
@@ -493,6 +502,13 @@ class DashboardPage(QtWidgets.QWidget):
         notifications.setLayout(notif_layout)
         layout.addWidget(notifications)
 
+        analyst_box = QtWidgets.QGroupBox("Рекомендации искусственного аналитика")
+        analyst_layout = QtWidgets.QVBoxLayout()
+        self.ai_recommendations_list = QtWidgets.QListWidget()
+        analyst_layout.addWidget(self.ai_recommendations_list)
+        analyst_box.setLayout(analyst_layout)
+        layout.addWidget(analyst_box)
+
         self._store.result_added.connect(self._refresh)
         self._refresh()
 
@@ -503,6 +519,7 @@ class DashboardPage(QtWidgets.QWidget):
         self.risk_distribution.update_distribution(self._store.risk_distribution())
         self._refresh_transactions()
         self._refresh_notifications()
+        self._refresh_ai_recommendations()
 
     def _refresh_transactions(self) -> None:
         records = self._store.recent_transactions(limit=10)
@@ -523,12 +540,42 @@ class DashboardPage(QtWidgets.QWidget):
                 self.tx_table.setItem(row, column, QtWidgets.QTableWidgetItem(value))
 
     def _refresh_notifications(self) -> None:
-        entries = self._store.recent_notes(limit=10)
+        notes = list(self._store.recent_notes(limit=5))
+        alerts = list(self._store.analyst_alerts(limit=5))
+        combined: list[str] = []
+        combined.extend(alerts)
+        for note in notes:
+            if len(combined) >= 5:
+                break
+            combined.append(note)
+
         self.notifications_list.clear()
-        if not entries:
+        if not combined:
             self.notifications_list.addItem("Пока нет комментариев по рискам.")
             return
-        self.notifications_list.addItems(entries)
+        self.notifications_list.addItems(combined)
+
+    def _refresh_ai_recommendations(self) -> None:
+        briefings = self._store.recent_briefings(limit=5)
+        self.ai_recommendations_list.clear()
+        if not briefings:
+            self.ai_recommendations_list.addItem(
+                "Рекомендации появятся после выполнения анализов."
+            )
+            return
+
+        for briefing in briefings:
+            if briefing.recommendations:
+                primary = briefing.recommendations[0]
+                text = (
+                    f"{briefing.address} ({briefing.network.name.upper()}): "
+                    f"{primary.title} — приоритет {primary.priority}"
+                )
+            else:
+                text = (
+                    f"{briefing.address} ({briefing.network.name.upper()}): {briefing.summary}"
+                )
+            self.ai_recommendations_list.addItem(text)
 
     def _metric_card(
         self, title: str, icon: str
@@ -682,6 +729,7 @@ class NewAnalysisPage(QtWidgets.QWidget):
             self.launch_button.setEnabled(True)
 
         self.log_output.append("Анализ завершен. Результаты доступны на вкладке 'Анализы'.")
+        self.log_output.append("Формирование заключения искусственного аналитика…")
         self.analysis_completed.emit(result)
 
     def _resolve_selected_network(self) -> Network | None:
@@ -787,8 +835,12 @@ class AnalysesPage(QtWidgets.QWidget):
         self._refresh_table()
         self._store.result_added.connect(self._on_result_added)
 
-    def add_result(self, result: AddressAnalysisResult) -> None:
-        self._store.add_result(result)
+    def add_result(
+        self,
+        result: AddressAnalysisResult,
+        briefing: AnalystBriefing | None = None,
+    ) -> None:
+        self._store.add_result(result, briefing=briefing)
 
     def _on_result_added(self, result: AddressAnalysisResult) -> None:
         self._results.append(result)
@@ -1206,8 +1258,14 @@ class GraphWidget(QtWidgets.QWidget):
 class AnalysisDetailPage(QtWidgets.QWidget):
     """Detailed view with tabs for overview, graph, transactions, forecasts, report."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        store: AnalysisStore | None = None,
+        analyst: ArtificialAnalyst | None = None,
+    ) -> None:
         super().__init__()
+        self._store = store
+        self._analyst = analyst
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(16)
@@ -1228,8 +1286,13 @@ class AnalysisDetailPage(QtWidgets.QWidget):
         layout.addWidget(self.tabs)
 
         self.current_analysis: AddressAnalysisResult | None = None
+        self.current_briefing: AnalystBriefing | None = None
 
-    def set_analysis(self, analysis: AddressAnalysisResult) -> None:
+    def set_analysis(
+        self,
+        analysis: AddressAnalysisResult,
+        briefing: AnalystBriefing | None = None,
+    ) -> None:
         self.current_analysis = analysis
         risk_display, _ = _risk_to_display(analysis.risk_level)
         updated_time = QtCore.QDateTime.currentDateTime().toString("dd.MM.yyyy HH:mm:ss")
@@ -1249,10 +1312,14 @@ class AnalysisDetailPage(QtWidgets.QWidget):
             API_SERVICE_KEYS["blockcypher"].display_name,
             API_SERVICE_KEYS["heuristic_mixer"].display_name,
         ]
+        services_used.append("Искусственный аналитик ArcheBlow")
         self.services_list.addItems(services_used)
 
         self.graph_widget.load_from_analysis(analysis)
         self._populate_transactions(analysis)
+
+        self.current_briefing = self._resolve_briefing(analysis, briefing)
+        self._render_briefing(self.current_briefing)
 
     def _create_overview(self) -> QtWidgets.QWidget:
         widget = QtWidgets.QWidget()
@@ -1280,7 +1347,91 @@ class AnalysisDetailPage(QtWidgets.QWidget):
         services_box.setLayout(services_layout)
         layout.addWidget(services_box)
 
+        ai_box = QtWidgets.QGroupBox("Искусственный аналитик")
+        ai_layout = QtWidgets.QVBoxLayout()
+        self.ai_summary = QtWidgets.QTextEdit()
+        self.ai_summary.setReadOnly(True)
+        self.ai_summary.setPlaceholderText(
+            "После завершения проверки появится сводка искусственного аналитика."
+        )
+        ai_layout.addWidget(self.ai_summary)
+        self.ai_confidence_label = QtWidgets.QLabel("Уверенность: —")
+        self.ai_confidence_label.setStyleSheet("color: #8b949e;")
+        ai_layout.addWidget(self.ai_confidence_label)
+
+        ai_layout.addWidget(QtWidgets.QLabel("Рекомендации:"))
+        self.ai_actions = QtWidgets.QListWidget()
+        self.ai_actions.setAlternatingRowColors(True)
+        ai_layout.addWidget(self.ai_actions)
+
+        ai_layout.addWidget(QtWidgets.QLabel("Ключевые факты:"))
+        self.ai_highlights = QtWidgets.QListWidget()
+        self.ai_highlights.setAlternatingRowColors(True)
+        ai_layout.addWidget(self.ai_highlights)
+
+        ai_layout.addWidget(QtWidgets.QLabel("Тревоги:"))
+        self.ai_alerts = QtWidgets.QListWidget()
+        self.ai_alerts.setAlternatingRowColors(True)
+        ai_layout.addWidget(self.ai_alerts)
+
+        ai_box.setLayout(ai_layout)
+        layout.addWidget(ai_box)
+
         return widget
+
+    def _resolve_briefing(
+        self,
+        analysis: AddressAnalysisResult,
+        briefing: AnalystBriefing | None,
+    ) -> AnalystBriefing | None:
+        if briefing is not None:
+            return briefing
+        if self._store is not None:
+            stored = self._store.briefing_for(analysis.address, analysis.network)
+            if stored is not None:
+                return stored
+        if self._analyst is not None:
+            return self._analyst.generate_briefing(analysis)
+        return None
+
+    def _render_briefing(self, briefing: AnalystBriefing | None) -> None:
+        self.ai_summary.clear()
+        self.ai_actions.clear()
+        self.ai_highlights.clear()
+        self.ai_alerts.clear()
+
+        if briefing is None:
+            self.ai_summary.setPlainText(
+                "Искусственный аналитик сформирует заключение после выполнения нового анализа."
+            )
+            self.ai_confidence_label.setText("Уверенность: —")
+            return
+
+        self.ai_summary.setPlainText(briefing.summary)
+        self.ai_confidence_label.setText(
+            f"Уверенность: {int(round(briefing.confidence * 100))}%"
+        )
+
+        if briefing.recommendations:
+            for item in briefing.recommendations:
+                actions_text = "; ".join(item.actions) if item.actions else "Дополнительные действия не требуются"
+                self.ai_actions.addItem(
+                    f"[{item.priority}] {item.title} — {item.rationale}. Действия: {actions_text}"
+                )
+        else:
+            self.ai_actions.addItem("Рекомендации не требуются.")
+
+        if briefing.highlights:
+            for highlight in briefing.highlights:
+                self.ai_highlights.addItem(highlight)
+        else:
+            self.ai_highlights.addItem("Дополнительных фактов не выявлено.")
+
+        if briefing.alerts:
+            for alert in briefing.alerts:
+                self.ai_alerts.addItem(alert)
+        else:
+            self.ai_alerts.addItem("Тревожных событий не обнаружено.")
 
     def _create_transactions_tab(self) -> QtWidgets.QWidget:
         widget = QtWidgets.QWidget()
@@ -1445,6 +1596,7 @@ class IntegrationsPage(QtWidgets.QWidget):
             ("coingecko", "Ошибка", "--", "Просмотр логов"),
             ("ofac_watchlist", "Активен", "--", "Обновить"),
             ("heuristic_mixer", "Активен", "--", "Синхронизировать"),
+            ("ai_analyst", "Активен", "N/A", "Открыть инструкцию"),
         ]
 
         table = QtWidgets.QTableWidget(len(services), 5)
@@ -1484,7 +1636,8 @@ class IntegrationsPage(QtWidgets.QWidget):
             "BLOCKCYPHER_API_KEY=...\n"
             "ETHERSCAN_API_KEY=...\n"
             "TRONGRID_API_KEY=...\n"
-            "POLYGONSCAN_API_KEY=..."
+            "POLYGONSCAN_API_KEY=...\n"
+            "ARCHEBLOW_AI_ANALYST=N/A"
         )
         help_layout.addWidget(example)
         help_box.setLayout(help_layout)
@@ -1586,6 +1739,25 @@ class SettingsPage(QtWidgets.QWidget):
 
         layout.addLayout(form)
 
+        analyst_box = QtWidgets.QGroupBox("Искусственный аналитик ArcheBlow")
+        analyst_layout = QtWidgets.QVBoxLayout()
+        analyst_description = QtWidgets.QLabel(analyst_playbook())
+        analyst_description.setWordWrap(True)
+        analyst_layout.addWidget(analyst_description)
+        analyst_layout.addWidget(QtWidgets.QCheckBox("Автоматически формировать рекомендации"))
+        guidance = QtWidgets.QPlainTextEdit()
+        guidance.setReadOnly(True)
+        guidance.setPlainText(
+            "1. Запускайте анализ через раздел 'Новый анализ'.\n"
+            "2. После завершения проверяйте сводку на вкладке 'Обзор'.\n"
+            "3. Выполняйте шаги из списка рекомендаций и фиксируйте их статус.\n"
+            "4. Используйте тревоги для настройки уведомлений и ручного расследования."
+        )
+        guidance.setMaximumHeight(120)
+        analyst_layout.addWidget(guidance)
+        analyst_box.setLayout(analyst_layout)
+        layout.addWidget(analyst_box)
+
         save_button = QtWidgets.QPushButton("Сохранить изменения")
         save_button.setStyleSheet(
             "background: #238636; color: #ffffff; border-radius: 10px; padding: 10px 18px;"
@@ -1626,6 +1798,7 @@ class MainWindow(QtWidgets.QMainWindow):
         content_layout.setSpacing(0)
 
         self.store = AnalysisStore()
+        self.analyst = ArtificialAnalyst()
 
         self.top_bar = TopBar(self.store)
         self.top_bar.request_search.connect(self._handle_search)
@@ -1637,7 +1810,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.dashboard_page = DashboardPage(self.store)
         self.new_analysis_page = NewAnalysisPage()
         self.analyses_page = AnalysesPage(self.store)
-        self.detail_page = AnalysisDetailPage()
+        self.detail_page = AnalysisDetailPage(self.store, self.analyst)
         self.integrations_page = IntegrationsPage()
         self.reports_page = ReportsPage()
         self.settings_page = SettingsPage()
@@ -1712,22 +1885,31 @@ class MainWindow(QtWidgets.QMainWindow):
         QtWidgets.QMessageBox.information(self, "Поиск", f"Результаты поиска по запросу: {query}")
 
     def _analysis_completed(self, analysis: AddressAnalysisResult) -> None:
-        self.store.add_result(analysis)
+        briefing = self.analyst.generate_briefing(analysis)
+        self.store.add_result(analysis, briefing=briefing)
         risk_display, _ = _risk_to_display(analysis.risk_level)
+        recommendation_line = ""
+        if briefing.recommendations:
+            primary = briefing.recommendations[0]
+            recommendation_line = (
+                f"\nРекомендация аналитика: {primary.title} (приоритет {primary.priority})."
+            )
         QtWidgets.QMessageBox.information(
             self,
             "Анализ завершен",
             (
                 f"Анализ адреса {analysis.address} ({analysis.network.name.title()}) завершен.\n"
                 f"Итоговый уровень риска: {risk_display}."
+                f"{recommendation_line}"
             ),
         )
-        self.detail_page.set_analysis(analysis)
+        self.detail_page.set_analysis(analysis, briefing)
         self.navigation.set_active("analyses")
         self.pages.setCurrentWidget(self.analyses_page)
 
     def _open_analysis_details(self, analysis: AddressAnalysisResult) -> None:
-        self.detail_page.set_analysis(analysis)
+        briefing = self.store.briefing_for(analysis.address, analysis.network)
+        self.detail_page.set_analysis(analysis, briefing)
         if self.pages.indexOf(self.detail_page) == -1:
             self.pages.addWidget(self.detail_page)
         self.pages.setCurrentWidget(self.detail_page)

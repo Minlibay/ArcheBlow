@@ -119,6 +119,12 @@ API_SERVICE_KEYS: Mapping[str, APIServiceKey] = {
         env_var="HEURISTIC_MIXER_TOKEN",
         default_value="N/A",
     ),
+    "ai_analyst": APIServiceKey(
+        service_id="ai_analyst",
+        display_name="ArcheBlow AI Analyst",
+        env_var="ARCHEBLOW_AI_ANALYST",
+        default_value="N/A",
+    ),
 }
 
 

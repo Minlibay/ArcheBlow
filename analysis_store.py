@@ -8,6 +8,7 @@ from typing import Mapping, Sequence
 from PySide6 import QtCore
 
 from archeblow_service import AddressAnalysisResult, Network, TransactionHop
+from ai_analyst import AnalystBriefing
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,17 +32,62 @@ class AnalysisStore(QtCore.QObject):
     def __init__(self) -> None:
         super().__init__()
         self._results: list[AddressAnalysisResult] = []
+        self._briefings: list[AnalystBriefing] = []
 
-    def add_result(self, result: AddressAnalysisResult) -> None:
+    def add_result(
+        self,
+        result: AddressAnalysisResult,
+        *,
+        briefing: AnalystBriefing | None = None,
+    ) -> None:
         """Persist ``result`` and notify subscribers."""
 
         self._results.append(result)
+        if briefing is not None:
+            self._briefings.append(briefing)
         self.result_added.emit(result)
 
     def results(self) -> list[AddressAnalysisResult]:
         """Return a copy of all stored analyses."""
 
         return list(self._results)
+
+    def briefings(self) -> list[AnalystBriefing]:
+        """Return a copy of analyst briefings."""
+
+        return list(self._briefings)
+
+    def set_briefing(self, briefing: AnalystBriefing) -> None:
+        """Append an analyst briefing to the history."""
+
+        self._briefings.append(briefing)
+
+    def briefing_for(self, address: str, network: Network) -> AnalystBriefing | None:
+        """Return the latest briefing for the provided address and network."""
+
+        normalized = address.lower()
+        for briefing in reversed(self._briefings):
+            if briefing.address.lower() == normalized and briefing.network == network:
+                return briefing
+        return None
+
+    def recent_briefings(self, limit: int = 5) -> Sequence[AnalystBriefing]:
+        """Return the most recent analyst briefings."""
+
+        if not self._briefings:
+            return []
+        return list(reversed(self._briefings[-limit:]))
+
+    def analyst_alerts(self, limit: int = 5) -> Sequence[str]:
+        """Return the latest alerts raised by the analyst."""
+
+        alerts: list[str] = []
+        for briefing in reversed(self._briefings):
+            for alert in briefing.alerts:
+                alerts.append(alert)
+                if len(alerts) >= limit:
+                    return alerts
+        return alerts
 
     def metrics(self) -> Mapping[str, int]:
         """Return headline metrics for the dashboard."""
