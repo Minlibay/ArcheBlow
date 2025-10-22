@@ -20,6 +20,7 @@ import datetime as _dt
 import math
 from typing import Iterable, Mapping, Sequence
 
+import httpx
 from PySide6 import QtCore, QtGui, QtWidgets
 from qasync import QEventLoop, asyncSlot
 
@@ -340,6 +341,11 @@ class StatusIndicator(QtWidgets.QFrame):
 
         self.services_chip = StatsChip("Подключено API", "🔑")
         layout.addWidget(self.services_chip)
+
+        monitoring_icon = QtWidgets.QLabel("🛰️")
+        layout.addWidget(monitoring_icon)
+        self.monitoring_label = QtWidgets.QLabel()
+        layout.addWidget(self.monitoring_label)
 
         layout.addStretch(1)
 
@@ -2289,6 +2295,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.top_bar = TopBar(self.store, self.monitoring)
         self.top_bar.request_search.connect(self._handle_search)
         content_layout.addWidget(self.top_bar)
+
+        self.store = AnalysisStore()
 
         self.pages = QtWidgets.QStackedWidget()
         self.dashboard_page = DashboardPage(self.store, self.monitoring)
